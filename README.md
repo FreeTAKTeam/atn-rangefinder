@@ -2,6 +2,14 @@
 
 Protocol research, integration planning, and original synthetic fixtures for a planned ATN rangefinder/binocular adapter for [Reticulum Emergency Management (REM)](https://github.com/FreeTAKTeam/reticulum_mobile_emergency_management).
 
+## Aim
+
+The aim of this project is to connect ATN rangefinders and binoculars to REM so users can exchange observations and selected map points between the device and the REM map over Bluetooth.
+
+In the planned workflow, a user measures a point with the ATN device and receives its range, bearing, and inclination in REM. With a suitable observer-position fix and verified reference information, the adapter can turn that observation into a map point. In the other direction, the user selects REM map points (PLEs) to show as markers on the device display. Updates to those selected points may synchronize during an explicitly authorized session, with a clear way to stop or disconnect.
+
+This repository provides the protocol evidence, integration contracts, implementation plan, and synthetic fixtures needed to develop and validate that adapter. The intended outcome is a tested Android REM plugin backed by a Rust protocol core, with documented support for verified device models and firmware versions. The integration is planned; it is not yet implemented.
+
 ## Project status
 
 This repository currently contains **documentation and synthetic test material only**. It does not yet provide a working device driver, Rust crate, Android APK, or REM plugin. Hardware semantics and the required REM map-point contract still need verification.
