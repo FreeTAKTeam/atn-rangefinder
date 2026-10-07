@@ -1,0 +1,61 @@
+{
+  "provenance": "SYNTHETIC: codec fixtures only; numbers are not measured, calibrated or approved device limits",
+  "measurement": {
+    "att_value_hex": "01010078fffb00d2",
+    "expected_raw": {
+      "distance": 120,
+      "pitch": -5,
+      "compass": 210
+    },
+    "physical_semantics_verified": false
+  },
+  "display_marker": {
+    "fields": {
+      "slot_id": 2,
+      "marker_type": 0,
+      "enabled": true,
+      "color": 4,
+      "distance": 120,
+      "pitch": -5,
+      "compass": 210
+    },
+    "att_value_hex": "010204147800fbffd200"
+  },
+  "opaque_reply": {
+    "att_value_hex": "010201a1b2c3",
+    "expected": {
+      "signature": 1,
+      "command": 2,
+      "answer_signed": 1,
+      "opaque_tail_hex": "a1b2c3"
+    },
+    "firmware_status_meaning": "unknown; synthetic value is not a success-code assertion"
+  },
+  "invalid_measurements": [
+    {
+      "hex": "01010078fffb00",
+      "reason": "too short"
+    },
+    {
+      "hex": "02010078fffb00d2",
+      "reason": "unsupported signature"
+    },
+    {
+      "hex": "01050078fffb00d2",
+      "reason": "not measurement command"
+    },
+    {
+      "hex": "01010078fffb00d200",
+      "reason": "trailing byte; reject or explicitly classify unsupported version, never silently accept"
+    }
+  ],
+  "fragment_boundary_lengths": [
+    0,
+    1,
+    494,
+    495,
+    496,
+    990,
+    991
+  ]
+}

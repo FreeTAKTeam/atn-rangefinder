@@ -1,0 +1,20 @@
+# Local agent and credential configuration
+/.agents/
+/.aws/
+/.codex/
+
+# Private research and proprietary binaries
+*.apk
+*.xapk
+*.aab
+*.pcap
+*.pcapng
+*.btsnoop
+*.keystore
+*.jks
+.env
+.env.*
+
+# OS/editor artifacts
+.DS_Store
+*~
