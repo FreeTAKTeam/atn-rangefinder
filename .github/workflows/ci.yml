@@ -1,0 +1,26 @@
+name: Rust adapter checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        toolchain: ["1.85.0", "stable"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal --component rustfmt,clippy
+      - name: Format
+        run: cargo +${{ matrix.toolchain }} fmt --all -- --check
+      - name: Clippy
+        run: cargo +${{ matrix.toolchain }} clippy --workspace --all-targets --locked -- -D warnings
+      - name: Tests
+        run: cargo +${{ matrix.toolchain }} test --workspace --locked
+      - name: Real JNI ABI smoke
+        run: bash scripts/test-jni.sh
+        env:
+          RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}

@@ -1,0 +1,4 @@
+body { font: 16px system-ui, sans-serif; color: #192e38; background: #edf3f5; margin: 0; }
+main { max-width: 44rem; padding: 1.5rem; margin: auto; }
+button { font: inherit; padding: .8rem 1rem; border-radius: .5rem; border: 0; background: #214f61; color: white; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; }

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" tools:targetApi="31" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <queries><package android:name="${remHostPackage}" /></queries>
+    <application android:label="ATN Rangefinder" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:icon="@drawable/ic_atn"
+        android:allowBackup="false" android:fullBackupContent="false" android:dataExtractionRules="@xml/data_extraction_rules" android:usesCleartextTraffic="false">
+        <!-- The real REM SDK checks host package AND certificate on every Binder call;
+             signature permissions cannot span independently signed publisher APKs. -->
+        <service android:name=".AtnPluginService" android:exported="true" android:foregroundServiceType="connectedDevice" tools:ignore="ExportedService">
+            <intent-filter><action android:name="network.reticulum.emergency.PLUGIN_V1" /></intent-filter>
+            <meta-data android:name="rem.plugin.id" android:value="org.freetak.atn" />
+            <meta-data android:name="rem.plugin.displayName" android:value="ATN Rangefinder" />
+            <meta-data android:name="rem.plugin.version" android:value="0.1.0" />
+            <meta-data android:name="rem.plugin.apiMajor" android:value="1" />
+            <meta-data android:name="rem.plugin.apiMinor" android:value="1" />
+            <meta-data android:name="rem.plugin.capabilities" android:value="{}" />
+            <meta-data android:name="rem.plugin.messages" android:value="[]" />
+            <meta-data android:name="rem.plugin.configurationEntrypoint" android:value="rem-plugin-config/index.html" />
+        </service>
+        <activity android:name=".SettingsActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

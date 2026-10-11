@@ -1,6 +1,6 @@
 # Codex handoff
 
-This repository currently contains research documentation and synthetic fixtures, not a working Rust crate, Android APK or REM plugin. Do not claim an implementation, build or hardware test exists merely because the documents and fixtures validate.
+This directory contains the original research documentation and synthetic fixtures. The implementation now lives in the root Rust workspace and Android project; use the root AGENTS.md and implementation-status document as well. Do not claim an implementation, build or hardware test exists merely because the documents and fixtures validate.
 
 ## Read order
 

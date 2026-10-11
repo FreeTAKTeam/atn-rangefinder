@@ -1,6 +1,6 @@
 # atn-rangefinder
 
-Documentation and synthetic test material for a planned REM plugin connecting an ATN rangefinder/binocular to REM's map-facing interface. The planned architecture is a Rust protocol core with an Android service/JNI wrapper using REM's APK/Binder plugin boundary. This repository does **not** implement a device driver or a REM plugin.
+Documentation and synthetic test material for a planned REM plugin connecting an ATN rangefinder/binocular to REM's map-facing interface. The planned architecture is a Rust protocol core with an Android service/JNI wrapper using REM's APK/Binder plugin boundary. This directory preserves the initial research snapshot. The executable adapter now lives in the [repository root](../README.md); its host and hardware limitations are tracked separately.
 
 ## Boundary
 

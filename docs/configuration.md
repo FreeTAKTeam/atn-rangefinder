@@ -1,0 +1,17 @@
+# Configuration and operation
+
+Open the ATN Rangefinder settings activity, grant Android Bluetooth permissions, enter and validate the configuration, select a scanned device, then connect explicitly after enabling the plugin and starting REM's node. The connection begins with notifications only.
+
+`examples/synthetic-config.json` is an invented test template. Its `protocolVerified` and `calibrationConfirmed` flags are false, and its north/datum are unverified. **Its numbers are not recommended device settings or field limits.** Replace policies with verified evidence for your model/firmware before authorizing geographic conversion or display writes.
+
+All operational inputs are explicit: model/firmware/evidence, distance and angular scaling, slant/horizontal range, inclination sign, north reference and optional east-positive magnetic declination with age/evidence, WGS84 datum, incoming/outgoing raw field bounds, maximum range, observer/observation/declination age, horizontal accuracy, pitch treatment, marker type/color, selected slots, queue/byte limits, retention, and transport timeouts/capacities. Unknown or missing configuration fails closed. Unverified configurations support raw observations only.
+
+Wire field bounds can reject sentinel intervals via an accepted range. More complex discontinuous validity sets require a subsequent verified profile extension; do not mark such a device profile verified until its semantics can be expressed correctly. Outgoing azimuth uses a conventional nonnegative representation and must fit the configured display bounds. No implicit wrapped or signed compass encoding is assumed.
+
+Bluetooth characteristic UUIDs and numeric wire formats come from the research evidence; they are protocol constants. WGS84 constants are mathematical definitions. Actual GATT write capacity is negotiated and passed to Rust, never derived from a captured handle or hard-coded MTU. Implementation resource ceilings (4096 queued/request/retained entries, 16 MiB decoded image/queued bytes, protocol u16 encoded-image length, and Java scheduling bounds) prevent unbounded allocation; they are not device capability claims or operational defaults. Configuration may choose smaller limits.
+
+Before starting synchronization, enter an exact list of selected PLE identifiers and owned device slots. A successful start creates a fresh ephemeral session. Later updates to those selected PLEs synchronize without repeated approval. Style changes and a locally chosen PNG are separate operations. PNGs must match the explicitly configured validated dimensions and format; a local limit is not proof of firmware support. Stop/disconnect cancels work; it never clears all markers or retries partial writes.
+
+The current REM host cannot supply the proposed map contract, so geographic map exchange and outbound synchronization remain unavailable with that host. See `map-contract.md`. Raw observations remain visible in native status and a configured bounded in-memory history; process death clears that history. Copying/exporting private field observations is outside the published fixture workflow.
+
+Transport completion, application reply receipt, and display rendering are shown separately. Only the operator's explicit display confirmation supplies rendering evidence; a nonnegative reply code is not translated to success.

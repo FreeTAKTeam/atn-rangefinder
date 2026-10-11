@@ -1,0 +1,4 @@
+<resources>
+    <string name="device_choice">%1$s (%2$s)</string>
+    <string name="scan_all">Scan all BLE devices (choose explicitly; ATN services are checked after connection)</string>
+</resources>

@@ -1,5 +1,7 @@
 # Phased implementation plan
 
+Implementation progress and acceptance evidence are tracked in [implementation status](../../docs/implementation-status.md). The phases below retain the original acceptance requirements.
+
 This document is a handoff for future implementation, not authorization to change REM or operate a device. Keep the existing repository conventions and verify the current host contract before coding.
 
 ## Integration constraint

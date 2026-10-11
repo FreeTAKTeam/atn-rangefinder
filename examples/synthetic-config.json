@@ -1,0 +1,18 @@
+{
+  "deviceProfile": {"model":"synthetic-test-device","firmware":"fixture-only","evidenceId":"synthetic-codec-tests","protocolVerified":false},
+  "semantics": {
+    "evidenceId":"synthetic-geometry-tests", "calibrationConfirmed":false,
+    "distanceMetersPerUnit":1.0, "angleDegreesPerUnit":1.0,
+    "rangeKind":"slant", "pitchConvention":"positiveUp",
+    "bearingReference":{"kind":"unverified"}, "datum":"unverified",
+    "maxDistanceM":10000.0,
+    "observationBounds":{"distance":{"min":0,"max":10000},"pitch":{"min":-90,"max":90},"compass":{"min":0,"max":359}},
+    "displayBounds":{"distance":{"min":0,"max":10000},"pitch":{"min":-90,"max":90},"compass":{"min":0,"max":359}}
+  },
+  "eligibility":{"maxObserverAgeMs":1000,"maxObservationAgeMs":1000,"maxDeclinationAgeMs":1000,"maxHorizontalAccuracyM":5.0},
+  "pitchPolicy":"horizontalDisplay", "markerType":0, "color":4,
+  "queueCapacity":8, "maxQueuedBytes":65536, "queueTtlMs":5000,
+  "operationTimeoutMs":3000, "maxObservations":8,
+  "transport":{"requestMtu":512,"connectTimeoutMs":10000,"writeTimeoutMs":3000,"hostRequestTimeoutMs":2000,"maxPendingHostRequests":16,"maxQueuedWrites":1,"scanTimeoutMs":5000},
+  "pngLimits":{"maxEncodedBytes":65535,"maxWidth":40,"maxHeight":40,"maxPixels":1600,"maxDecodedBytes":6440,"maxChunks":128,"expectedDimensions":[40,40]}
+}

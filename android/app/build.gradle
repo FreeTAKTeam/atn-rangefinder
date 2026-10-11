@@ -1,0 +1,59 @@
+import java.security.MessageDigest
+
+apply plugin: 'com.android.application'
+
+def required = { name ->
+    def value = project.findProperty(name)?.toString()?.trim()
+    if (!value) throw new GradleException("Missing -P${name}; see android/README.md")
+    value
+}
+def sdkAar = file(required('remSdkAar'))
+def sdkSha256 = required('remSdkSha256').toLowerCase(Locale.ROOT)
+def sdkCommit = required('remSdkCommit')
+def hostPackage = required('remHostPackage')
+def hostFingerprints = required('remHostFingerprints').toLowerCase(Locale.ROOT)
+if (!(sdkCommit ==~ /[a-fA-F0-9]{40}/)) throw new GradleException('remSdkCommit must be a full source commit')
+if (!sdkAar.isFile()) throw new GradleException('remSdkAar must be an external SDK AAR')
+def digest = MessageDigest.getInstance('SHA-256').digest(sdkAar.bytes).encodeHex().toString()
+if (!(sdkSha256 ==~ /[0-9a-f]{64}/) || digest != sdkSha256) throw new GradleException('REM SDK SHA-256 mismatch')
+if (!(hostPackage ==~ /[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+/)) throw new GradleException('Invalid host package')
+if (!hostFingerprints.split(',').every { it ==~ /[0-9a-f]{64}/ }) throw new GradleException('Host certificate fingerprints must be comma-separated SHA-256 values')
+def nativeLibs = project.findProperty('nativeLibsDir')?.toString()
+
+android {
+    namespace 'org.freetak.atn'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'org.freetak.atn'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+        manifestPlaceholders = [remHostPackage: hostPackage]
+        buildConfigField 'String', 'REM_HOST_PACKAGE', '"' + hostPackage + '"'
+        buildConfigField 'String', 'REM_HOST_FINGERPRINTS', '"' + hostFingerprints + '"'
+        buildConfigField 'String', 'REM_SDK_COMMIT', '"' + sdkCommit + '"'
+        buildConfigField 'String', 'REM_SDK_SHA256', '"' + sdkSha256 + '"'
+    }
+    buildFeatures { buildConfig true }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    if (nativeLibs) sourceSets.main.jniLibs.srcDirs = [nativeLibs]
+    buildTypes { release { minifyEnabled false } }
+}
+
+tasks.configureEach { task ->
+    if (task.name.matches(/assemble(Debug|Release)/)) {
+        task.doFirst {
+            if (!nativeLibs || fileTree(nativeLibs).matching { include '*/libatn_adapter.so' }.isEmpty()) {
+                throw new GradleException('A usable APK requires -PnativeLibsDir with ABI/libatn_adapter.so; run scripts/build-android.sh')
+            }
+        }
+    }
+}
+dependencies {
+    implementation files(sdkAar)
+    testImplementation 'junit:junit:4.13.2'
+}

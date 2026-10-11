@@ -1,6 +1,6 @@
 # atn-rangefinder
 
-Protocol research, integration planning, and original synthetic fixtures for a planned ATN rangefinder/binocular adapter for [Reticulum Emergency Management (REM)](https://github.com/FreeTAKTeam/reticulum_mobile_emergency_management).
+A Rust core and Android plugin for connecting ATN rangefinders and binoculars to [Reticulum Emergency Management (REM)](https://github.com/FreeTAKTeam/reticulum_mobile_emergency_management), with protocol research and original synthetic fixtures.
 
 ## Aim
 
@@ -8,13 +8,31 @@ The aim of this project is to connect ATN rangefinders and binoculars to REM so 
 
 In the planned workflow, a user measures a point with the ATN device and receives its range, bearing, and inclination in REM. With a suitable observer-position fix and verified reference information, the adapter can turn that observation into a map point. In the other direction, the user selects REM map points (PLEs) to show as markers on the device display. Updates to those selected points may synchronize during an explicitly authorized session, with a clear way to stop or disconnect.
 
-This repository provides the protocol evidence, integration contracts, implementation plan, and synthetic fixtures needed to develop and validate that adapter. The intended outcome is a tested Android REM plugin backed by a Rust protocol core, with documented support for verified device models and firmware versions. The integration is planned; it is not yet implemented.
+This repository provides the adapter implementation, protocol evidence, integration contracts, and synthetic fixtures needed to validate that workflow. The intended outcome is a tested Android REM plugin backed by a Rust protocol core, with documented support for verified device models and firmware versions. End-to-end integration still requires the host contract and hardware acceptance.
 
 ## Project status
 
-This repository currently contains **documentation and synthetic test material only**. It does not yet provide a working device driver, Rust crate, Android APK, or REM plugin. Hardware semantics and the required REM map-point contract still need verification.
+The repository now contains a Rust protocol core, configurable geographic validation and synchronization rules, a JSON/JNI adapter, and an Android REM plugin with explicit device selection and BLE lifecycle handling.
 
-The planned architecture is a Rust protocol/validation core with an Android service/JNI wrapper using REM's APK/Binder plugin boundary.
+The adapter follows the inspected RCH marker record shape and uses the real REM APK/Binder SDK. **The current REM host still lacks the required map/observer API.** Codecs and synthetic adapter exchange are tested; real REM map visibility, supported firmware semantics, and physical-device rendering remain acceptance gates. See the [implementation status](docs/implementation-status.md).
+
+## Implementation
+
+- [`atn-protocol`](crates/atn-protocol): strict codecs, bounded icon reassembly and PNG validation.
+- [`atn-domain`](crates/atn-domain): explicit observer/reference eligibility, WGS84 geometry and selected-slot sessions.
+- [`atn-adapter`](crates/atn-adapter): bounded host requests, RCH marker compatibility and JNI actions.
+- [Android plugin](android/README.md): trusted Binder service, permissions/settings activity, BLE notifications and serialized display writes.
+- [Map contract](docs/map-contract.md), [configuration](docs/configuration.md), and [synthetic configuration template](examples/synthetic-config.json).
+
+Build and validate the Rust workspace with:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+Android builds require an external pinned REM SDK AAR, its SHA-256, the trusted host package/certificate, and built JNI libraries. See [Android build instructions](android/README.md). No SDK source, proprietary binary, signing key or field capture is vendored.
 
 ## Intended scope
 
@@ -35,7 +53,7 @@ The supplied research folder is preserved under [`atn-rangefinder-docs/`](atn-ra
 5. [Implementation plan and acceptance criteria](atn-rangefinder-docs/docs/implementation-plan.md)
 6. [Synthetic fixtures](atn-rangefinder-docs/fixtures/README.md)
 
-The fixtures are invented codec examples, not field evidence. No APK, decompiled proprietary source, private packet capture, actual location, or device identifier is included. No build or executable test suite is currently supplied.
+The fixtures are invented codec examples, not field evidence. No APK, decompiled proprietary source, private packet capture, actual location, or device identifier is included. The original fixtures now feed executable codec and integration tests.
 
 ## Contributing
 

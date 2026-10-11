@@ -18,3 +18,11 @@
 # OS/editor artifacts
 .DS_Store
 *~
+
+# Build outputs and external SDKs
+/target/
+/android/.gradle/
+/android/**/build/
+/android/local.properties
+/android/**/jniLibs/
+*.aar
