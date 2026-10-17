@@ -5,8 +5,8 @@ Goal: implement the supplied research plan as an ATN adapter with a Rust validat
 Plan: `atn-rangefinder-docs/docs/implementation-plan.md`.
 
 Intent: exchange device observations and explicitly selected map points with configured physical references.
-Truth owners: ATN codec in `atn-protocol`; eligibility/geometry/session rules in `atn-domain`; Android owns BLE, permissions, and Binder; REM owns map storage and selection.
-Contract boundary: real REM APK/Binder SDK, externally built pinned AAR. The inspected REM host has no map/observer API. A proposed extension must be negotiated and fails closed on existing hosts.
+Truth owners: ATN codec in `atn-protocol`; eligibility/geometry/session rules in `atn-domain`; Android owns BLE, permissions, and Binder; REM owns marker identity/storage/replication, the observer fix and selection sessions.
+Contract boundary: real REM APK/Binder SDK, externally built pinned AAR. Since REM `91124cf` (1.5.1) the host implements plugin map API 1.3; the adapter declares that minor, checks the configured symbol against the host catalog and fails read-only on permission denial. Older hosts never bind it.
 Cutover: replace documentation-only status with tested codecs, domain rules, adapter and Android sources; retain original research provenance.
 Displaced path: no previous implementation exists.
 Acceptance evidence: synthetic codec and integration tests; Android compile; target REM map exchange and hardware rendering separately reported.

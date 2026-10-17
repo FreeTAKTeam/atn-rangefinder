@@ -1,58 +1,130 @@
-# Adapter map boundary and RCH compatibility
+# Adapter map boundary: REM plugin map API 1.3
 
-## Verified owners and current gap
+## Verified owners
 
-Read-only source inspection on 2026-10-10:
+Read-only source inspection on 2026-10-17 of REM `91124cffd8f7fa7df94684b672c2228d97f0522d`
+(`docs/plugins/android-plugin-system.md`, `crates/reticulum_mobile/src/jni_bridge/plugin_map_api.rs`,
+`plugin_map_session_api.rs`, `app_state/plugin_map_sessions.rs`, `packages/android-plugin-sdk`):
 
-- REM `ec6aadc81b3c18e2353211e97225a89d73af84dc`: the real Android SDK is API 1.1; Binder requests/responses use `protocolVersion`, `requestId`, `operation`, `payload`, `ok`, `result`/`error`. Host events use **`event`**, not `eventType`. The exhaustive Rust host operation switch still contains only `sensor.publish`, `lxmf.send`, `events.publish`, `notifications.raise`, and `operational.snapshot`.
-- RCH `2a599275ee36ea809dbd5ff773ebda6bf9d2a8d1`: `crates/r3akt-rch-core/src/lib.rs::MarkerRecord` and the server mirror own marker identity, storage and normalization. HTTP routes include `/api/markers` and marker position updates. `marker_idempotency.rs` binds a creation request to its validated payload and leaves identity minting in the host.
+- REM implements plugin API minor 2 (`mapMarkersRead`, `mapMarkersWrite`, `mapObserverRead`) and
+  minor 3 (`mapSelectionRead`, operator-selected sessions). Within API major 1 fields and
+  operations are only added. Map objects are ordinary shared REM markers handled by the same
+  native marker service (`r3akt-map-core`, RCH `19de27f419373c543fe6154aab2a3c027938b65d`) as the
+  REM UI and replicated to peers and RCH. Plugins get no second marker store and cannot browse the map.
+- REM negotiates the API minor at bind time: `start()` receives `apiMinor`, the lower of host and
+  plugin. A plugin declaring a newer minor than the host is **Incompatible and never bound**, so an
+  older REM shows the incompatibility itself; this plugin cannot report it.
+- Binder requests, responses and events use `protocolVersion`, `requestId`, `operation`,
+  `payload`, `ok`, `result`/`error{code,message}` and `event`, each at most 64 KiB UTF-8.
 
-The adapter follows RCH's record shape and host ownership. It does not create a separate RCH server, call its REST API, introduce a network transport, mint host marker identities, or impersonate operator telemetry. Both checkouts were inspected without editing them.
+The adapter declares API 1.3 and the four map capabilities. REM owns marker identity, storage,
+replication, the observer fix and session membership. The adapter never mints
+`object_destination_hash` or `sessionId`, never impersonates operator telemetry, and never calls
+RCH directly. Both checkouts were inspected without editing them.
 
-**The map operations below are a proposed REM extension, not an existing REM API.** The shipped adapter negotiates them; an unmodified REM host rejects the negotiation and the adapter retains raw observations in read-only mode. Synthetic test hosts exercise the contract but do not prove real REM map integration.
+## Operations used
 
-## Proposed version 1
+| Operation | Payload | Result | Adapter use |
+|---|---|---|---|
+| `map.symbols.list` | `{}` | `{items:[{id,set,mdi?,description,tak?,category,aliases}]}` | once per host start; the configured `hostMarker.symbol` must be an `id` or alias, otherwise the adapter stays read-only |
+| `map.markers.create` | `idempotencyKey`, `symbol`, `lat`, `lon`, optional `name`, `category`, `notes` | `{marker, created}` | one shared marker per eligible observation |
+| `map.observer.snapshot` | `{}` | `{available, observer{kind:"localDevice",…}, source:"device", datum:"WGS84", lat, lon, alt, horizontalAccuracyM, course, speed, updatedAtMs, ageMs}` or `{available:false, observer}` | per observation, at session start, and refreshed while a session is active |
+| `map.session.list` | `{}` | `{items:[session]}` | after the symbol check, on co-location confirmation; recovers a dropped `started` event |
+| `map.session.objects.get` | `sessionId` | `{session, objects}` | authoritative snapshot of a listed session; omitted objects leave the selection |
+| `map.session.stop` | `sessionId` | `{stopped:true}` | rejecting a session the adapter cannot serve; ending a session on disconnect, stop, profile change or local failure |
 
-Every operation travels through the real trusted Binder SDK envelope and its 65,536-byte UTF-8 size limit. The host must enforce publisher trust, plugin enablement, declared/granted map capabilities, observer ownership, and the selected-session boundary. Listing an operation in negotiation means it is available to this particular trusted plugin session, not merely compiled into the host. Future host capability declarations and the SDK API version increment belong to REM; this adapter's current manifest does not invent grants.
+Errors are typed: `PermissionDenied` (minor too old, capability not declared/granted, plugin
+disabled) makes the adapter read-only; `InvalidRequest` is recorded against the observation and
+never retried; `NotFound` for a session ends the local session; `HostError`, Binder failures and
+timeouts leave a marker creation **unknown**. `map.markers.update/position.update/delete/get/list`
+are not used in this release.
 
-| Operation | Payload | Result |
-|---|---|---|
-| `map.adapter.describe` | `contractVersion: 1` | `contractVersion: 1`, `operations` including all six rows |
-| `map.observer.get` | empty object | `observer`: explicit resolved measuring-device fix |
-| `map.ple.get` | `pleId` | `marker`: RCH-compatible marker record |
-| `map.ple.subscribe` | `sessionId`, exact `pleIds` | `accepted: true` |
-| `map.ple.unsubscribe` | `sessionId` | `accepted: true` |
-| `map.observation.draft.put` | `observationId`, `draft` with full provenance | `accepted: true` after the host retains the draft |
+## Markers created from observations
 
-`draft.put` is a draft observation operation, not confirmation, replication or a claim of GNSS/survey accuracy. Host-owned confirmation and map projection must retain the observation and its reference evidence. Creation should be idempotent by observationId plus a canonical validated payload; a conflicting reuse must fail, following RCH's payload-bound creation principle. The adapter sends once and does not blindly retry.
+`idempotencyKey` is the connection-scoped observation identity (`<connectionId>/<sequence>`;
+the connection ID is a fresh UUID per BLE connection, never a hardware address). REM scopes the key
+to the plugin and answers a replay with the original marker and `created:false`, so the host can
+never mint a second marker for one observation. Each decoded measurement is its own observation,
+even when values repeat.
 
-Subscriptions must be replaced atomically on a new session from the same plugin, bounded by the requested selected set, removed by unsubscribe, and released on plugin stop/process death or host restart. The host must not replay stale updates into a new subscription. No selection/list API or automatic expansion is implied. Selection IDs and device slots are explicitly entered by the operator in the adapter's settings activity.
+Creation requires a verified device profile, verified semantics, an eligible observer fix and the
+operator's connection-scoped co-location confirmation. `lat`/`lon` are two-dimensional WGS84 from
+the Vincenty direct solution; REM markers carry no altitude and REM's `alt` has no stated vertical
+datum, so neither is used. `name` is the configured prefix plus the observation sequence (≤ 128
+characters). `notes` (≤ 1024 characters, bounded before sending) carries raw values and configured
+units, measurement time, horizontal distance and true bearing, observer position/accuracy/time,
+profile and semantics evidence, north reference, co-location evidence and projection method. No
+ATN hardware identifier and no REM identity hex is included.
 
-## Records and events
+Outcomes per observation are shown in native status as `retained {reason}`, `observerRequested`,
+`createRequested`, `created {hash}`, `alreadyExisted {hash}`, `rejected {code}` or
+`unknown {reason}`. An unknown outcome is never retried automatically and nothing survives
+reconnect or process restart.
 
-RCH marker fields are snake_case, matching the inspected source exactly:
+## Observer
 
-```text
-local_id, object_destination_hash, origin_rch, marker_type, symbol,
-name, category, lat, lon, notes, created_ts_ms, updated_ts_ms
-```
+REM's snapshot is this phone's own latest fix: `source` must be `device`, `datum` must be `WGS84`,
+`horizontalAccuracyM` must be present and within the configured maximum, `updatedAtMs` must be
+within the configured observer age. `alt`, `course` and `speed` are ignored. REM cannot know the
+phone is at the binocular; the operator confirms that for the current connection
+(`confirmColocation` with evidence text), and the confirmation is cleared on disconnect, host loss,
+configuration change or withdrawal. Without it the fix is `unverified` and conversion and display
+writes are blocked. Older fixes never replace newer ones; conflicting same-time fixes are rejected.
 
-The adapter uses `object_destination_hash` as the PLE identity. The wall-clock `updated_ts_ms` is retained as provenance, not a guaranteed monotonic concurrency token. Older timestamps are refused; same-time changes can be legitimate and are compared by encoded marker content. Strong replay ordering would require a host-owned revision/event contract.
+## Selected-object sessions
 
-Observer JSON uses `position {latitude, longitude, altitudeM}`, `capturedAtMs`, `horizontalAccuracyM`, `source` (`devicePosition`, `verifiedColocated`, `verifiedOffsetResolved`, `unverified`), and `evidenceId`. Altitudes, when used, must be WGS84 ellipsoidal metres. The host must resolve co-location/offset evidence before returning an eligible fix; its latest unrelated telemetry record is unsuitable. Unknown source, stale/future time and excessive uncertainty block conversion. Older fixes cannot replace newer ones; conflicting same-time fixes are rejected.
+Only the operator starts a session, from a marker's details sheet (**Share with ATN Rangefinder**).
+A session holds 1–16 objects; a plugin has at most 4 active sessions. Events arrive through
+`onHostEvent` as `{"protocolVersion":1,"event":…,"payload":…}`:
 
-Events use SDK envelope `{"protocolVersion":1,"event":"...","payload":{...}}`:
+- `map.session.started`: session fields plus `objects` snapshots.
+- `map.session.object.updated`: `sessionId`, `reason`, `object`.
+- `map.session.object.removed`: `sessionId`, `objectDestinationHash`.
+- `map.session.stopped`: `sessionId`, `reason` (`operator`, `capability-revoked`, `plugin-disabled`,
+  `plugin-unavailable`, `objects-removed`). No event follows the plugin's own `map.session.stop`.
 
-- `map.ple.updated`: `sessionId`, `marker`.
-- `map.ple.removed`: `sessionId`, `pleId`; releases authorization without a device clear command.
-- `map.observer.updated`: `sessionId`, `observer`.
+Delivery is best effort; sessions end without an event on `stop()`, unbind, Binder death, node
+stop or REM restart and are never restored. The adapter therefore also lists sessions and treats
+every unknown or previously ended `sessionId` as terminal (bounded set, never reused).
 
-The adapter ignores old-session/unselected events. It serializes writes, rechecks observer eligibility before each frame, records opaque replies independently, and requires explicit evidence for observed display confirmation.
+This release serves **one** display session at a time. A session is accepted only when the host
+is ready, the device is connected, the profile is verified and co-location is confirmed, and
+when the selection fits the configured ordered `slotPool`; slots are allocated in REM's
+`objectDestinationHashes` order. Otherwise the whole session is rejected, nothing is allocated,
+the reason is shown in status and `map.session.stop` is sent once. Serving several concurrent
+sessions from disjoint slot allocations is planned (Stage 3 of
+`docs/goals/atn-rem-plugin/plan.md`).
+
+A map object uses the RCH representation REM emits: `object_destination_hash`, `origin_rch`,
+`type`, `name`, `category`, `symbol`, `notes`, `position:{lat,lon}`, `time`, `stale_at`,
+`created_at`, `updated_at` (RFC 3339) plus `textTruncated`. The adapter keys on
+`object_destination_hash`, refuses an object older than the one it holds by `updated_at`, and
+compares same-time objects by content. `textTruncated` is provenance only. Unknown fields are
+tolerated because the contract only adds fields.
+
+Relative device fields (distance, pitch, compass) are recomputed from the latest eligible observer
+fix for every write. A stale or missing fix holds writes and requests a fresh snapshot rather than
+sending old geometry; the lifecycle tick refreshes the fix at half the configured maximum age.
+Removing an object or stopping a session releases its slot without a device clear command.
 
 ## Native/platform contract
 
-`org.freetak.atn.NativeCore.dispatch(String)` accepts JSON bounded to 393,216 UTF-8 bytes `{cmd, nowMs, ...}` (enough for a u16-sized PNG byte array); Binder envelopes remain capped at 65,536 bytes. It returns `{ok, result?, error?, actions}`. Android supplies the time, runs calls on one handler, and owns real GATT/Binder completion. Native commands include configure, hostStarted/Stopped, connected/disconnected, notification, hostResponse/Event, startSync/stopSync, setStyle, setIcon, transportResult, confirmDisplay, tick, status.
+`org.freetak.atn.NativeCore.dispatch(String)` accepts JSON bounded to 393,216 UTF-8 bytes
+`{cmd, nowMs, ...}`; Binder envelopes remain capped at 65,536 bytes. It returns
+`{ok, result?, error?, actions}`. Android supplies the time, runs calls on one handler, and owns
+real GATT/Binder completion. Native commands: configure, hostStarted (`apiMinor` from the start
+session JSON), hostStopped, connected/disconnected, confirmColocation/clearColocation,
+notification, hostResponse/hostEvent, stopSync, setStyle, setIcon, transportResult,
+confirmDisplay, tick, status.
 
-A native write action includes numeric operationId, one-based frameNumber, totalFrames, sessionId, connectionId, and bytes. Platform completion must echo operationId/frameNumber/sessionId/connectionId and completed. An old callback cannot advance a new authorization. Only one frame is issued at a time. A reply before the final transport callback is retained, but cannot establish transport completion. In-flight cancellation closes GATT; a fresh connection is explicit.
+Native actions: `hostRequest` (envelope), `cancelHostRequests` (`keepRequestIds`),
+`sessionAuthorized` (`sessionId`, `connectionId`: Java admits writes only for that pair),
+`write` (numeric `operationId`, one-based `frameNumber`, `totalFrames`, `sessionId`,
+`connectionId`, `bytes`), `cancelWrites`, `disconnect`, `status`. Platform completion must echo
+operationId/frameNumber/sessionId/connectionId and `completed`. An old callback cannot advance a
+new authorization. Only one frame is issued at a time. In-flight cancellation closes GATT; a fresh
+connection is explicit.
 
-No session, selected-set authorization, queued write or marker cache resumes across reconnect/process restart. Configuration and an explicitly picked device may be saved privately; this is not authorization to reconnect or write.
+No session, slot allocation, co-location confirmation, queued write or marker cache resumes across
+reconnect or process restart. Configuration and an explicitly picked device may be saved privately;
+this is not authorization to reconnect or write.

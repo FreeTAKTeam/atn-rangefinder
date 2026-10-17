@@ -1,5 +1,8 @@
 # Implementation and acceptance status
 
+**Current contract: REM plugin map API 1.3** (see the 2026-10-17 migration section at the end;
+earlier sections describe the superseded proposed contract and remain as history).
+
 Verified locally on 2026-10-10. Three agents implemented/reviewed the protocol, domain and Android layers; the main agent integrated the JNI runtime, RCH-compatible records, configuration, documentation and synthetic host exchange.
 
 ## Plan coverage
@@ -48,3 +51,48 @@ Generated ignored APK: `android/app/build/outputs/apk/debug/app-debug.apk`. The 
 4. Actual map exchange in both directions and separately observed device marker/icon rendering.
 
 The original plan's acceptance requirements remain in force. No raw private traffic, actual locations, device identifiers, proprietary APKs, SDK source or signing keys are included in committed source.
+
+## REM map API 1.3 migration (2026-10-17, Stage 1 of `docs/goals/atn-rem-plugin/plan.md`)
+
+REM `91124cffd8f7fa7df94684b672c2228d97f0522d` (release 1.5.1) implements plugin map API minors 2
+and 3. The proposed `map.adapter.describe`, `map.observer.get`, `map.ple.*` and
+`map.observation.draft.put` contract was removed from the production adapter and Android path and
+replaced with the implemented operations, events, capabilities and record shape documented in
+`docs/map-contract.md`:
+
+- `crates/atn-adapter`: `RemMapObject` decodes REM's RCH `api_value()` shape (nested `position`,
+  RFC 3339 `updated_at`, `textTruncated`, unknown fields tolerated) with a dependency-free RFC 3339
+  parser; `AdapterConfig` gained `hostMarker` (catalog symbol/category/name prefix) and the
+  ordered `slotPool`. The runtime declares API 1.3 through `hostStarted{apiMinor}`, checks the
+  configured symbol against `map.symbols.list`, creates one shared marker per eligible observation
+  with the connection-scoped idempotency key, keeps typed per-observation host outcomes
+  (`created`, `alreadyExisted`, `rejected`, `unknown`, `retained`), serves one REM selection session
+  at a time with atomic slot allocation and `map.session.stop` rejection, recovers dropped
+  `started` events through `map.session.list`, refreshes the observer snapshot and holds writes on
+  an ineligible fix, and requires an explicit connection-scoped co-location confirmation.
+- Android: manifest declares `rem.plugin.apiMinor` 3 and the four map capabilities; the service
+  reads the negotiated `apiMinor` from the start session, admits writes only for the
+  `sessionAuthorized` session/connection pair, and replaces the manual selected-PLE entry with
+  co-location confirmation; REM's **Share with ATN Rangefinder** starts display sessions.
+- Documentation: `docs/map-contract.md` rewritten for the implemented API; README,
+  configuration, execution, alignment and Android docs updated; `examples/synthetic-config.json`
+  gained `hostMarker` and `slotPool`. Browser console, `atn-host-service` and other untracked local
+  work were left untouched.
+
+Local checks on 2026-10-17 (Rust 1.88 toolchain): `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (31 synthetic
+exchange tests against real API 1.3 envelopes plus 1 parser, 23 domain, 22 protocol and the
+web/host-service crates' tests) and `bash scripts/test-jni.sh` passed. The SDK AAR was rebuilt
+from the REM checkout at `91124cf…` in an external scratch directory (REM untouched):
+`rem-plugin-sdk-release.aar` SHA-256 `db90e2ecb239765c418ec471aee0f8a27e97c4e85ec048229d9d88ec0ff5fb29`.
+`scripts/build-android.sh --offline` (ARM64, NDK 27.0.12077973, Gradle 8.11.1, AGP 8.7.2,
+compile SDK 35) passed: 4 JVM scheduler tests, lint with no issues, debug APK SHA-256
+`8ef417a0e56f87cae1d245540a93612814c4fe7facfd97d1e5bf7ad08f5bc553` built with the synthetic
+all-zero host fingerprint, which cannot authenticate a real REM host.
+
+Status after Stage 1: **implemented but unproven**. Not performed: binding to a real REM 1.5.1
+host, real marker visibility and replication, real session events, Android OS BLE/Binder lifecycle
+on a device, physical binocular rendering, and the echo check for outbound display traffic.
+Remaining stages: explicit Start/Stop capture controls and bounded result-unknown resolution
+(Stage 2), concurrent sessions with disjoint allocations and periodic reconciliation (Stage 3),
+goTenna compatibility notes (Stage 4), hardware qualification.

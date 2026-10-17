@@ -23,10 +23,25 @@ pub struct TransportConfig {
     pub scan_timeout_ms: u64,
 }
 
+/// How eligible observations become ordinary shared REM markers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostMarkerPolicy {
+    /// A REM symbol catalog `id` or alias, checked against `map.symbols.list`.
+    pub symbol: String,
+    pub category: Option<String>,
+    /// Marker name prefix; the observation identity is appended.
+    pub name_prefix: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AdapterConfig {
     pub device_profile: DeviceProfile,
+    pub host_marker: HostMarkerPolicy,
+    /// Ordered, operator-verified device display slots available to REM
+    /// selection sessions. Allocation follows REM's selection order.
+    pub slot_pool: Vec<u16>,
     pub semantics: SemanticsPolicy,
     pub eligibility: EligibilityPolicy,
     pub pitch_policy: MarkerPitchPolicy,
@@ -50,6 +65,31 @@ impl AdapterConfig {
             .map_err(|e| e.to_string())?;
         self.eligibility.validate().map_err(|e| e.to_string())?;
         let t = &self.transport;
+        let marker = &self.host_marker;
+        if marker.symbol.trim().is_empty()
+            || !marker.symbol.bytes().all(|b| b.is_ascii_graphic())
+            || marker.symbol.len() > 64
+            || marker.name_prefix.trim().is_empty()
+            || marker.name_prefix.chars().count() > 64
+            || marker
+                .category
+                .as_ref()
+                .is_some_and(|c| c.trim().is_empty() || c.chars().count() > 64)
+        {
+            return Err(
+                "host marker symbol, category and name prefix must be short nonempty text".into(),
+            );
+        }
+        let mut slots = std::collections::BTreeSet::new();
+        if self.slot_pool.is_empty()
+            || self.slot_pool.len() > 128
+            || !self
+                .slot_pool
+                .iter()
+                .all(|slot| *slot <= 127 && slots.insert(*slot))
+        {
+            return Err("slot pool must list unique seven-bit display slots".into());
+        }
         if self.marker_type > 1 || self.color > 7 || !(23..=517).contains(&t.request_mtu) {
             return Err("unrepresentable marker fields or Bluetooth MTU".into());
         }

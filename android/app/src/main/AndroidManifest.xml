@@ -21,8 +21,8 @@
             <meta-data android:name="rem.plugin.displayName" android:value="ATN Rangefinder" />
             <meta-data android:name="rem.plugin.version" android:value="0.1.0" />
             <meta-data android:name="rem.plugin.apiMajor" android:value="1" />
-            <meta-data android:name="rem.plugin.apiMinor" android:value="1" />
-            <meta-data android:name="rem.plugin.capabilities" android:value="{}" />
+            <meta-data android:name="rem.plugin.apiMinor" android:value="3" />
+            <meta-data android:name="rem.plugin.capabilities" android:value="{&quot;mapMarkersRead&quot;:true,&quot;mapMarkersWrite&quot;:true,&quot;mapObserverRead&quot;:true,&quot;mapSelectionRead&quot;:true}" />
             <meta-data android:name="rem.plugin.messages" android:value="[]" />
             <meta-data android:name="rem.plugin.configurationEntrypoint" android:value="rem-plugin-config/index.html" />
         </service>

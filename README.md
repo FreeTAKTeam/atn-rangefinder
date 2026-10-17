@@ -6,7 +6,7 @@ A Rust core and Android plugin for connecting ATN rangefinders and binoculars to
 
 The aim of this project is to connect ATN rangefinders and binoculars to REM so users can exchange observations and selected map points between the device and the REM map over Bluetooth.
 
-In the planned workflow, a user measures a point with the ATN device and receives its range, bearing, and inclination in REM. With a suitable observer-position fix and verified reference information, the adapter can turn that observation into a map point. In the other direction, the user selects REM map points (PLEs) to show as markers on the device display. Updates to those selected points may synchronize during an explicitly authorized session, with a clear way to stop or disconnect.
+In the planned workflow, a user measures a point with the ATN device and receives its range, bearing, and inclination in REM. With a suitable observer-position fix and verified reference information, the adapter can turn that observation into a map point. In the other direction, the user shares REM map points with the plugin from a marker's details sheet to show them on the device display. Updates to those shared points synchronize for the life of that REM session, with a clear way to stop or disconnect.
 
 This repository provides the adapter implementation, protocol evidence, integration contracts, and synthetic fixtures needed to validate that workflow. The intended outcome is a tested Android REM plugin backed by a Rust protocol core, with documented support for verified device models and firmware versions. End-to-end integration still requires the host contract and hardware acceptance.
 
@@ -14,13 +14,13 @@ This repository provides the adapter implementation, protocol evidence, integrat
 
 The repository now contains a Rust protocol core, configurable geographic validation and synchronization rules, a JSON/JNI adapter, and an Android REM plugin with explicit device selection and BLE lifecycle handling.
 
-The adapter follows the inspected RCH marker record shape and uses the real REM APK/Binder SDK. **The current REM host still lacks the required map/observer API.** Codecs and synthetic adapter exchange are tested; real REM map visibility, supported firmware semantics, and physical-device rendering remain acceptance gates. See the [implementation status](docs/implementation-status.md).
+The adapter targets REM's implemented plugin map API 1.3 (REM 1.5.1, commit `91124cf`): eligible measurements become ordinary shared REM markers through `map.markers.create`, and points the operator shares with the plugin from a marker sheet are displayed on the device through REM selection sessions. Codecs and synthetic exchange against the real envelopes are tested; real REM map visibility, supported firmware semantics, and physical-device rendering remain acceptance gates. See the [implementation status](docs/implementation-status.md) and the [staged plan](docs/goals/atn-rem-plugin/plan.md).
 
 ## Implementation
 
 - [`atn-protocol`](crates/atn-protocol): strict codecs, bounded icon reassembly and PNG validation.
 - [`atn-domain`](crates/atn-domain): explicit observer/reference eligibility, WGS84 geometry and selected-slot sessions.
-- [`atn-adapter`](crates/atn-adapter): bounded host requests, RCH marker compatibility and JNI actions.
+- [`atn-adapter`](crates/atn-adapter): bounded REM map API 1.3 requests, REM/RCH map object decoding, idempotent marker creation, session slot allocation and JNI actions.
 - [Android plugin](android/README.md): trusted Binder service, permissions/settings activity, BLE notifications and serialized display writes.
 - [Map contract](docs/map-contract.md), [configuration](docs/configuration.md), and [synthetic configuration template](examples/synthetic-config.json).
 
@@ -38,7 +38,7 @@ Android builds require an external pinned REM SDK AAR, its SHA-256, the trusted 
 
 - Receive device range, bearing, and inclination observations, preserving their raw values and reference metadata.
 - Derive map observations only when suitable observer-position and coordinate-reference information is available.
-- Send selected REM map points (PLEs) to the device display within an explicitly authorized synchronization session.
+- Display REM map points the operator shares with the plugin, for the life of that REM selection session.
 
 LXMF, network-core changes, map rendering, ballistics, aiming, fire control, and firmware modification are outside scope.
 

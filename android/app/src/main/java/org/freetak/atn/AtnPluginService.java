@@ -37,7 +37,8 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
     private IBinder.DeathRecipient deathRecipient;
     private String connectionId = "";
     private String syncSessionId = "";
-    private String status = "Enable the plugin in REM, configure transport, then select and connect a device";
+    private int apiMinor = -1;
+    private String status = "Enable the plugin in REM (API 1.3), grant its map capabilities, configure transport, then select and connect a device";
     private String lastNativeResult = "";
     private boolean syncAuthorized;
     private boolean foreground;
@@ -72,7 +73,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
     }
     @Override protected Set<String> allowedHostPackageNames() { return Collections.singleton(BuildConfig.REM_HOST_PACKAGE); }
     @Override protected String getDescriptorJson() {
-        return "{\"pluginId\":\"org.freetak.atn\",\"apiMajor\":1,\"apiMinor\":1}";
+        return "{\"pluginId\":\"org.freetak.atn\",\"apiMajor\":1,\"apiMinor\":" + PluginProtocol.MAP_SESSION_API_MINOR + "}";
     }
     @Override protected void onPluginStart(IRemPluginHost value, String sessionJson) {
         handler.post(() -> {
@@ -82,7 +83,12 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
             deathRecipient = () -> handler.post(() -> endHost("binder.death"));
             try { value.asBinder().linkToDeath(deathRecipient, 0); }
             catch (RemoteException error) { endHost("binder.death"); return; }
-            status = "REM connected. Select and connect a device explicitly";
+            // REM passes the negotiated minor; a host older than 1.3 never binds this plugin.
+            try { apiMinor = new JSONObject(sessionJson).optInt("apiMinor", -1); }
+            catch (JSONException error) { apiMinor = -1; }
+            status = apiMinor >= PluginProtocol.MAP_SESSION_API_MINOR
+                ? "REM connected (plugin API 1." + apiMinor + "). Select and connect a device explicitly"
+                : "REM plugin API 1." + PluginProtocol.MAP_SESSION_API_MINOR + " required; map exchange unavailable";
             try {
                 transport = preferences.transport();
                 JSONObject config = preferences.config();
@@ -91,7 +97,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
                     call(command("configure", "config", config));
                 }
             } catch (JSONException error) { status = "Transport configuration required"; }
-            call(command("hostStarted"));
+            call(command("hostStarted", "apiMinor", Math.max(apiMinor, 0)));
             scheduleTick();
         });
     }
@@ -172,22 +178,27 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
         handler.removeCallbacks(tick);
         if (host != null && transport != null) handler.post(tick);
     }
-    void startSyncFromUi(JSONArray selected) {
+    /** The operator attests that this phone, whose fix REM reports, is at the binocular. */
+    void confirmColocationFromUi(String evidence) {
         if (!ble.ready() || host == null) { status = "Connect the selected device and REM first"; return; }
-        JSONObject request = command("startSync", "selected", selected);
-        String freshSessionId = UUID.randomUUID().toString();
-        try { request.put("sessionId", freshSessionId); } catch (JSONException ignored) { }
-        JSONObject response = call(request);
-        syncAuthorized = response.optBoolean("ok") && ble.ready();
-        syncSessionId = syncAuthorized ? freshSessionId : "";
-        status = syncAuthorized ? "Selected-point session authorized; waiting for verified host data" : "Session rejected; inspect native status";
+        JSONObject response = call(command("confirmColocation", "evidenceId", evidence));
+        status = response.optBoolean("ok")
+            ? "Co-location confirmed. Share points with this plugin from REM's marker sheet to display them"
+            : "Co-location confirmation rejected; inspect native status";
+    }
+    void clearColocationFromUi() {
+        syncAuthorized = false;
+        syncSessionId = "";
+        cancelWrites();
+        call(command("clearColocation"));
+        status = "Co-location confirmation withdrawn. Read-only observation remains active";
     }
     void stopSyncFromUi() {
         syncAuthorized = false;
         syncSessionId = "";
         cancelWrites();
         call(command("stopSync"));
-        status = "Synchronization stopped. Read-only observation remains active";
+        status = "Display session stopped. Read-only observation remains active";
     }
     void confirmFromUi(long id, String evidence) {
         JSONObject request = command("confirmDisplay", "operationId", id);
@@ -213,7 +224,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
     }
     private void endHost(String reason) {
         IRemPluginHost previous = host;
-        host = null; syncAuthorized = false;
+        host = null; syncAuthorized = false; apiMinor = -1;
         handler.removeCallbacks(tick);
         if (previous != null && deathRecipient != null) previous.asBinder().unlinkToDeath(deathRecipient, 0);
         deathRecipient = null;
@@ -227,7 +238,9 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
     private JSONObject state() throws JSONException {
         return new JSONObject().put("status", status).put("deviceAlias", preferences.alias())
             .put("connected", ble.ready()).put("writeCapacity", ble.ready() ? ble.capacity() : 0)
-            .put("syncAuthorized", syncAuthorized).put("nativeAvailable", NativeCore.available())
+            .put("syncAuthorized", syncAuthorized).put("syncSessionId", syncSessionId)
+            .put("apiMinor", apiMinor).put("requiredApiMinor", PluginProtocol.MAP_SESSION_API_MINOR)
+            .put("nativeAvailable", NativeCore.available())
             .put("sdkCommit", BuildConfig.REM_SDK_COMMIT).put("sdkSha256", BuildConfig.REM_SDK_SHA256);
     }
     private JSONObject call(JSONObject command) {
@@ -276,6 +289,14 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
                 }
                 break;
             case "status": status = action.optString("message", action.toString()); break;
+            case "sessionAuthorized":
+                // REM's operator-started session authorizes writes for this connection only.
+                if (ble.ready() && connectionId.equals(action.optString("connectionId"))) {
+                    syncSessionId = action.getString("sessionId");
+                    syncAuthorized = true;
+                    status = "REM session " + syncSessionId + " authorized for display writes";
+                } else { syncAuthorized = false; syncSessionId = ""; }
+                break;
             case "cancelWrites": syncAuthorized = false; syncSessionId = ""; discardWrites(); break;
             case "cancelHostRequests":
                 Set<String> keep = new HashSet<>();

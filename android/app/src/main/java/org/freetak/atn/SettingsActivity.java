@@ -80,7 +80,7 @@ public final class SettingsActivity extends Activity {
         layout = new LinearLayout(this); layout.setOrientation(LinearLayout.VERTICAL); layout.setPadding(24, 24, 24, 24);
         scroll.addView(layout); setContentView(scroll);
         text("ATN Rangefinder", 24);
-        text("Enable and trust this plugin in REM. Configure policies below, choose a device, then connect. A connection starts read-only. Map synchronization requires a compatible REM map adapter and an explicit selected-point session.", 16);
+        text("Enable and trust this plugin in REM 1.5.1 or later (plugin API 1.3) and grant its map capabilities. Configure policies below, choose a device, then connect. A connection starts read-only. Eligible measurements become shared REM markers; points you share with this plugin from a REM marker sheet are displayed on the device.", 16);
         status = text("", 16);
         alias = text(preferences.alias(), 16);
         button("Grant Bluetooth permissions", this::requestBluetoothPermissions);
@@ -101,22 +101,21 @@ public final class SettingsActivity extends Activity {
             } catch (JSONException error) { message(error.getMessage()); }
         });
         text("Device semantics and map policy JSON", 20);
-        text("Paste an explicit configuration matching docs/configuration.md and examples/synthetic-config.json. Unsupported model/firmware, stale or uncertain observer fixes and unknown reference metadata block mapping and device writes. Saving changes stops synchronization.", 16);
+        text("Paste an explicit configuration matching docs/configuration.md and examples/synthetic-config.json, including hostMarker (REM catalog symbol) and slotPool. Unsupported model/firmware, stale or uncertain observer fixes and unknown reference metadata block mapping and device writes. Saving changes stops any display session.", 16);
         config = editor("{}", 12);
         try { config.setText(preferences.config().toString(2)); } catch (JSONException ignored) { }
         button("Validate and save map policy", this::saveConfig);
-        text("Selected PLEs and owned slots", 20);
-        text("Enter an array of {\"pleId\":\"...\",\"slotId\":...}. Only this selected set may synchronize during the session. Device slot ownership must be established by the operator.", 16);
-        selection = editor("[]", 3);
-        button("Authorize selected-point synchronization", () -> {
-            try {
-                String raw = selection.getText().toString();
-                PluginProtocol.requireJsonSize(raw, "Selection");
-                JSONArray selected = new JSONArray(raw);
-                AtnPluginService.ui(service -> service.startSyncFromUi(selected));
-            } catch (JSONException error) { message(error.getMessage()); }
+        text("Observer co-location", 20);
+        text("REM reports this phone's own position as the observer. Confirm, for this connection only, that the phone is beside the binocular; describe the evidence. Without it measurements stay raw and shared points are rejected.", 16);
+        selection = editor("", 2);
+        button("Confirm phone is at the binocular", () -> {
+            String evidence = selection.getText().toString().trim();
+            if (evidence.isEmpty() || evidence.length() > 64) { message("Describe the co-location evidence in up to 64 characters"); return; }
+            AtnPluginService.ui(service -> service.confirmColocationFromUi(evidence));
         });
-        button("Stop synchronization", () -> AtnPluginService.ui(AtnPluginService::stopSyncFromUi));
+        button("Withdraw co-location confirmation", () -> AtnPluginService.ui(AtnPluginService::clearColocationFromUi));
+        text("Display sessions start from REM: open a marker's details sheet and choose Share with ATN Rangefinder. Slots are taken from the configured slot pool in REM's selection order; a selection larger than the pool is rejected and stopped. Stop a session here or with REM's Stop control.", 16);
+        button("Stop display session", () -> AtnPluginService.ui(AtnPluginService::stopSyncFromUi));
         text("Style for the authorized selected set", 20);
         text("Marker type (0 or 1) and color (0 red, 1 orange, 2 yellow, 3 green, 4 blue, 5 gray, 6 dark gray, 7 offline gray). A style change refreshes only the authorized selected set.", 16);
         markerType = editor("", 1);
@@ -130,7 +129,7 @@ public final class SettingsActivity extends Activity {
             } catch (NumberFormatException error) { message("Enter marker type and color as integers"); }
         });
         text("Optional local PNG icon", 20);
-        text("Enter a PLE ID from the authorized selected set. Choose a PNG file within your configured icon bounds. Position and icon are separate operations.", 16);
+        text("Enter the object_destination_hash of a point in the active REM session. Choose a PNG file within your configured icon bounds. Position and icon are separate operations.", 16);
         iconPle = editor("", 1);
         button("Choose a PNG and send to selected PLE", () -> {
             requestedIconPle = iconPle.getText().toString().trim();

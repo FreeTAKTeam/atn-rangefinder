@@ -1,5 +1,7 @@
 {
   "deviceProfile": {"model":"synthetic-test-device","firmware":"fixture-only","evidenceId":"synthetic-codec-tests","protocolVerified":false},
+  "hostMarker": {"symbol":"marker","category":null,"namePrefix":"ATN observation"},
+  "slotPool": [2,3,4,5],
   "semantics": {
     "evidenceId":"synthetic-geometry-tests", "calibrationConfirmed":false,
     "distanceMetersPerUnit":1.0, "angleDegreesPerUnit":1.0,
