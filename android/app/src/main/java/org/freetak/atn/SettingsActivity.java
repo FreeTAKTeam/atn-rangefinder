@@ -52,6 +52,8 @@ public final class SettingsActivity extends Activity {
     private TextView alias;
     private TextView details;
     private TextView capture;
+    private TextView sessions;
+    private EditText sessionId;
     private EditText transport;
     private EditText config;
     private EditText selection;
@@ -62,6 +64,7 @@ public final class SettingsActivity extends Activity {
     private EditText markerColor;
     private CheckBox scanAll;
     private String requestedIconPle;
+    private String requestedIconSession;
     private BluetoothLeScanner scanner;
     private int discoveryLimit;
     private final Runnable scanTimeout = this::stopScan;
@@ -70,6 +73,7 @@ public final class SettingsActivity extends Activity {
             status.setText(AtnPluginService.summary());
             details.setText(AtnPluginService.nativeResult());
             capture.setText(AtnPluginService.captureStatus());
+            sessions.setText(AtnPluginService.sessionsStatus());
             handler.postDelayed(this, 1000L);
         }
     };
@@ -121,8 +125,14 @@ public final class SettingsActivity extends Activity {
         capture = text(AtnPluginService.captureStatus(), 16);
         button("Start capture", () -> AtnPluginService.ui(AtnPluginService::startCaptureFromUi));
         button("Stop capture", () -> AtnPluginService.ui(AtnPluginService::stopCaptureFromUi));
-        text("Display sessions start from REM: open a marker's details sheet and choose Share with ATN Rangefinder. Slots are taken from the configured slot pool in REM's selection order; a selection larger than the pool is rejected and stopped. Stop a session here or with REM's Stop control.", 16);
-        button("Stop display session", () -> AtnPluginService.ui(AtnPluginService::stopSyncFromUi));
+        text("Display sessions start from REM: open a marker's details sheet and choose Share with ATN Rangefinder. Up to four sessions run at once; each takes the first free slots of the configured slot pool in REM's selection order. A selection that does not fit is rejected and stopped, and REM shows the reason as a notification. Releasing a slot does not clear the device display. Stop a session here or with REM's Stop control.", 16);
+        sessions = text(AtnPluginService.sessionsStatus(), 14);
+        text("REM session ID (for stop, icon and display confirmation; leave empty to stop all sessions)", 16);
+        sessionId = editor("", 1);
+        button("Stop display session", () -> {
+            String id = sessionId.getText().toString().trim();
+            AtnPluginService.ui(service -> service.stopSyncFromUi(id));
+        });
         text("Style for the authorized selected set", 20);
         text("Marker type (0 or 1) and color (0 red, 1 orange, 2 yellow, 3 green, 4 blue, 5 gray, 6 dark gray, 7 offline gray). A style change refreshes only the authorized selected set.", 16);
         markerType = editor("", 1);
@@ -136,15 +146,16 @@ public final class SettingsActivity extends Activity {
             } catch (NumberFormatException error) { message("Enter marker type and color as integers"); }
         });
         text("Optional local PNG icon", 20);
-        text("Enter the object_destination_hash of a point in the active REM session. Choose a PNG file within your configured icon bounds. Position and icon are separate operations.", 16);
+        text("Enter the REM session ID above and the object_destination_hash of a point in that session. Choose a PNG file within your configured icon bounds. Position and icon are separate operations.", 16);
         iconPle = editor("", 1);
         button("Choose a PNG and send to selected PLE", () -> {
             requestedIconPle = iconPle.getText().toString().trim();
-            if (requestedIconPle.isEmpty()) { message("Enter a selected PLE ID"); return; }
+            requestedIconSession = sessionId.getText().toString().trim();
+            if (requestedIconPle.isEmpty() || requestedIconSession.isEmpty()) { message("Enter the REM session ID and a selected PLE ID"); return; }
             startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/png").addCategory(Intent.CATEGORY_OPENABLE), ICON);
         });
         text("Confirm device display (after looking at the device)", 20);
-        text("Transport completion and reply bytes do not prove display success. Enter the operationId from native status only after observing the expected marker on the selected device.", 16);
+        text("Transport completion and reply bytes do not prove display success. Enter the REM session ID above and the operationId from native status only after observing the expected marker on the selected device.", 16);
         confirmation = editor("", 1);
         text("Describe the display evidence you observed", 16);
         confirmationEvidence = editor("", 2);
@@ -153,7 +164,9 @@ public final class SettingsActivity extends Activity {
                 long operationId = Long.parseLong(confirmation.getText().toString().trim());
                 String evidence = confirmationEvidence.getText().toString().trim();
                 if (operationId < 0 || evidence.isEmpty()) { message("Enter a valid operation ID and observed evidence"); return; }
-                AtnPluginService.ui(service -> service.confirmFromUi(operationId, evidence));
+                String session = sessionId.getText().toString().trim();
+                if (session.isEmpty()) { message("Enter the REM session ID the operation belongs to"); return; }
+                AtnPluginService.ui(service -> service.confirmFromUi(session, operationId, evidence));
             } catch (NumberFormatException error) { message("Operation ID must be a nonnegative integer"); }
         });
         text("Native status and local raw observation details", 20);
@@ -207,7 +220,8 @@ public final class SettingsActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode != ICON || resultCode != RESULT_OK || data == null || data.getData() == null) return;
         String pleId = requestedIconPle;
-        if (pleId == null || pleId.isEmpty()) { message("Icon selection context expired; choose again"); return; }
+        String session = requestedIconSession;
+        if (pleId == null || pleId.isEmpty() || session == null || session.isEmpty()) { message("Icon selection context expired; choose again"); return; }
         new Thread(() -> {
             try {
                 int limit = preferences.config().getJSONObject("pngLimits").getInt("maxEncodedBytes");
@@ -224,7 +238,7 @@ public final class SettingsActivity extends Activity {
                     }
                     owned = output.toByteArray();
                 }
-                handler.post(() -> AtnPluginService.ui(service -> service.iconFromUi(pleId, owned)));
+                handler.post(() -> AtnPluginService.ui(service -> service.iconFromUi(session, pleId, owned)));
             } catch (java.io.IOException | JSONException | SecurityException error) {
                 handler.post(() -> message("PNG unavailable or outside configured bounds"));
             }

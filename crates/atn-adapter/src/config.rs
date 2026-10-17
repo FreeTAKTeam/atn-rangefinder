@@ -54,6 +54,9 @@ pub struct AdapterConfig {
     /// Delay before the single same-key replay of a marker creation whose
     /// outcome became unknown within the same host and capture session.
     pub create_retry_delay_ms: u64,
+    /// Period of `map.session.list` reconciliation, and the age after which a
+    /// session's object snapshot is refreshed with `map.session.objects.get`.
+    pub reconcile_interval_ms: u64,
     pub max_observations: usize,
     pub transport: TransportConfig,
     pub png_limits: PngLimits,
@@ -117,6 +120,7 @@ impl AdapterConfig {
                 self.queue_ttl_ms,
                 self.operation_timeout_ms,
                 self.create_retry_delay_ms,
+                self.reconcile_interval_ms,
                 t.connect_timeout_ms,
                 t.write_timeout_ms,
                 t.host_request_timeout_ms,
@@ -142,6 +146,7 @@ impl AdapterConfig {
             .iter()
             .any(|v| *v > 3_600_000)
             || self.create_retry_delay_ms > 3_600_000
+            || self.reconcile_interval_ms > 3_600_000
             || self.queue_capacity > 4096
             || self.max_observations > 4096
             || self.max_queued_bytes > 16 * 1024 * 1024

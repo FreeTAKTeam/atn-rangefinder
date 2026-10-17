@@ -36,11 +36,12 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
     private IRemPluginHost host;
     private IBinder.DeathRecipient deathRecipient;
     private String connectionId = "";
-    private String syncSessionId = "";
     private int apiMinor = -1;
     private String status = "Enable the plugin in REM (API 1.3), grant its map capabilities, configure transport, then select and connect a device";
     private String lastNativeResult = "";
-    private boolean syncAuthorized;
+    // REM sessions admitted for display writes on this connection (up to four).
+    private final Set<String> authorizedSessions = new HashSet<>();
+    private String sessionsSummary = "No display sessions";
     // Mirrors of native state for the UI only; Rust enforces both gates.
     private boolean colocationConfirmed;
     private boolean captureActive;
@@ -140,6 +141,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
     }
     static String summary() { AtnPluginService current = instance; return current == null ? "Plugin not running. Enable it and start the node in REM" : current.status; }
     static String nativeResult() { AtnPluginService current = instance; return current == null ? "" : current.lastNativeResult; }
+    static String sessionsStatus() { AtnPluginService current = instance; return current == null ? "No display sessions" : current.sessionsSummary; }
     static String captureStatus() { AtnPluginService current = instance; return current == null ? "Capture not started" : current.captureSummary; }
     void connectFromUi() {
         if (host == null) { status = "Start the REM node and enable this plugin first"; return; }
@@ -159,14 +161,14 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
         }
     }
     void disconnectFromUi() {
-        syncAuthorized = false;
+        authorizedSessions.clear();
         call(command("stopSync"));
         cancelWrites();
         ble.close("Disconnected by operator");
         stopForeground();
     }
     JSONObject configureFromUi(JSONObject config) {
-        syncAuthorized = false;
+        authorizedSessions.clear();
         cancelWrites();
         try { transport = preferences.transport(); }
         catch (JSONException error) { status = "Save valid transport policy before map configuration"; return new JSONObject(); }
@@ -208,44 +210,50 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
         status = "Capture stopped. Measurements stay raw and local";
     }
     void clearColocationFromUi() {
-        syncAuthorized = false;
-        syncSessionId = "";
-        cancelWrites();
+        authorizedSessions.clear();
+                cancelWrites();
         call(command("clearColocation"));
         status = "Co-location confirmation withdrawn. Read-only observation remains active";
     }
-    void stopSyncFromUi() {
-        syncAuthorized = false;
-        syncSessionId = "";
-        cancelWrites();
-        call(command("stopSync"));
-        status = "Display session stopped. Read-only observation remains active";
+    /** An empty session ID stops every display session; otherwise only that one. */
+    void stopSyncFromUi(String sessionId) {
+        if (sessionId.isEmpty()) {
+            authorizedSessions.clear();
+            cancelWrites();
+            call(command("stopSync"));
+            status = "All display sessions stopped. Read-only observation remains active";
+        } else {
+            call(command("stopSync", "sessionId", sessionId));
+            status = "Display session " + sessionId + " stopped; other sessions continue";
+        }
     }
-    void confirmFromUi(long id, String evidence) {
+    void confirmFromUi(String sessionId, long id, String evidence) {
         JSONObject request = command("confirmDisplay", "operationId", id);
-        try { request.put("evidenceId", evidence); } catch (JSONException ignored) { }
-        call(request);
+        try { request.put("sessionId", sessionId).put("evidenceId", evidence); } catch (JSONException ignored) { }
+        JSONObject result = call(request).optJSONObject("result");
+        if (result != null && !result.optBoolean("accepted")) status = "Display confirmation not recorded: " + result.optString("reason");
     }
-    void iconFromUi(String pleId, byte[] png) {
-        if (!syncAuthorized || !ble.ready()) { status = "Authorize a selected-point session before sending an icon"; return; }
+    void iconFromUi(String sessionId, String pleId, byte[] png) {
+        if (!authorizedSessions.contains(sessionId) || !ble.ready()) { status = "Enter an authorized REM session ID before sending an icon"; return; }
         JSONObject request = command("setIcon", "pleId", pleId);
         try {
-            request.put("png", unsigned(png));
+            request.put("sessionId", sessionId).put("png", unsigned(png));
             if (request.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length > NativeCore.MAX_REQUEST_BYTES) {
                 status = "Icon exceeds the bounded JNI envelope"; return;
             }
-            call(request);
+            JSONObject result = call(request).optJSONObject("result");
+            if (result != null && !result.optBoolean("accepted")) status = "Icon not queued: " + result.optString("reason");
         } catch (JSONException error) { status = "Icon exceeds the bounded JNI envelope"; }
     }
     void styleFromUi(int markerType, int color) {
-        if (!syncAuthorized || !ble.ready()) { status = "Authorize a selected-point session before changing style"; return; }
+        if (authorizedSessions.isEmpty() || !ble.ready()) { status = "Authorize a selected-point session before changing style"; return; }
         JSONObject request = command("setStyle", "markerType", markerType);
         try { request.put("color", color); } catch (JSONException ignored) { }
         call(request);
     }
     private void endHost(String reason) {
         IRemPluginHost previous = host;
-        host = null; syncAuthorized = false; apiMinor = -1; captureActive = false; colocationConfirmed = false;
+        host = null; authorizedSessions.clear(); apiMinor = -1; captureActive = false; colocationConfirmed = false;
         handler.removeCallbacks(tick);
         if (previous != null && deathRecipient != null) previous.asBinder().unlinkToDeath(deathRecipient, 0);
         deathRecipient = null;
@@ -259,7 +267,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
     private JSONObject state() throws JSONException {
         return new JSONObject().put("status", status).put("deviceAlias", preferences.alias())
             .put("connected", ble.ready()).put("writeCapacity", ble.ready() ? ble.capacity() : 0)
-            .put("syncAuthorized", syncAuthorized).put("syncSessionId", syncSessionId)
+            .put("authorizedSessions", new JSONArray(authorizedSessions)).put("sessions", sessionsSummary)
             .put("colocationConfirmed", colocationConfirmed).put("captureActive", captureActive).put("captureStatus", captureSummary)
             .put("apiMinor", apiMinor).put("requiredApiMinor", PluginProtocol.MAP_SESSION_API_MINOR)
             .put("nativeAvailable", NativeCore.available())
@@ -271,9 +279,9 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
             command.put("nowMs", System.currentTimeMillis());
             JSONObject response = new JSONObject(NativeCore.dispatch(command.toString()));
             lastNativeResult = response.toString();
-            mirrorCapture(response);
+            mirrorStatus(response);
             if (!response.optBoolean("ok")) {
-                syncAuthorized = false;
+                authorizedSessions.clear();
                 discardWrites();
                 status = response.optJSONObject("error") == null ? "Native request rejected" : response.getJSONObject("error").optString("message");
             }
@@ -281,25 +289,68 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
             if (actions != null) for (int i = 0; i < actions.length(); i++) action(actions.getJSONObject(i));
             return response;
         } catch (JSONException | IllegalArgumentException | IllegalStateException error) {
-            syncAuthorized = false;
+            authorizedSessions.clear();
             discardWrites();
             status = "Native boundary rejected malformed or unavailable action";
             return new JSONObject();
         }
     }
-    /** Status-bearing responses (including every tick) carry the native capture state. */
-    private void mirrorCapture(JSONObject response) {
+    /** Status-bearing responses (including every tick) carry native capture and session state. */
+    private void mirrorStatus(JSONObject response) {
         JSONObject result = response.optJSONObject("result");
         if (result == null) return;
         JSONObject state = result.has("capture") ? result : result.optJSONObject("status");
         JSONObject capture = state == null ? null : state.optJSONObject("capture");
         if (capture == null) return;
+        sessionsSummary = describeSessions(state);
         colocationConfirmed = state.optBoolean("colocationConfirmed");
         captureActive = capture.optBoolean("active");
         JSONObject session = capture.optJSONObject("session");
         if (captureActive && session != null) captureSummary = "Capture active (" + session.optString("nonce") + ")";
         else if (capture.isNull("lastEnded")) captureSummary = "Capture not started";
         else captureSummary = "Capture stopped: " + capture.optString("lastEnded");
+    }
+    /** One line per session: slots, then transport, reply and operator display confirmation. */
+    private static String describeSessions(JSONObject state) {
+        StringBuilder text = new StringBuilder();
+        JSONArray sessions = state.optJSONArray("sessions");
+        int count = sessions == null ? 0 : sessions.length();
+        for (int i = 0; i < count; i++) {
+            JSONObject session = sessions.optJSONObject(i);
+            if (session == null) continue;
+            text.append("Session ").append(session.optString("sessionId")).append(": slots");
+            JSONArray selected = session.optJSONArray("selected");
+            for (int j = 0; selected != null && j < selected.length(); j++) {
+                JSONObject item = selected.optJSONObject(j);
+                if (item != null) text.append(' ').append(item.optInt("slotId")).append('=').append(item.optString("pleId"));
+            }
+            text.append("; queued ").append(session.optInt("queuedOperations"));
+            JSONObject active = session.optJSONObject("active");
+            if (active != null) text.append("; ").append(describeReport(active));
+            JSONArray completed = session.optJSONArray("completed");
+            if (completed != null && completed.length() > 0) {
+                text.append("; last ").append(describeReport(completed.optJSONObject(completed.length() - 1)));
+            }
+            text.append('\n');
+        }
+        if (count == 0) text.append("No display sessions\n");
+        JSONArray released = state.optJSONArray("releasedSlots");
+        if (released != null && released.length() > 0) {
+            text.append("Released slots (device display not cleared):");
+            for (int i = 0; i < released.length(); i++) {
+                JSONObject slot = released.optJSONObject(i);
+                if (slot != null) text.append(' ').append(slot.optInt("slotId"));
+            }
+        }
+        return text.toString().trim();
+    }
+    private static String describeReport(JSONObject report) {
+        if (report == null) return "";
+        return "op " + report.optLong("operationId") + " " + report.optString("kind")
+            + (report.optBoolean("transportComplete") ? ", transport done" : ", transport pending")
+            + (report.isNull("reply") ? ", no reply" : ", reply received")
+            + (report.isNull("displayConfirmation") ? ", display unconfirmed" : ", display confirmed")
+            + (report.isNull("cancelled") ? "" : ", cancelled");
     }
     private void action(JSONObject action) throws JSONException {
         switch (action.getString("kind")) {
@@ -313,7 +364,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
                 String session = action.getString("sessionId");
                 String connection = action.getString("connectionId");
                 SerialWriteQueue.Write write = new SerialWriteQueue.Write(id, frame, session, connection, bytes(action.getJSONArray("bytes")));
-                if (!syncAuthorized || writes == null || !ble.ready() || !syncSessionId.equals(session) || !connectionId.equals(connection)) {
+                if (!authorizedSessions.contains(session) || writes == null || !ble.ready() || !connectionId.equals(connection)) {
                     transportResult(write, false); return;
                 }
                 try {
@@ -329,19 +380,25 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
             case "sessionAuthorized":
                 // REM's operator-started session authorizes writes for this connection only.
                 if (ble.ready() && connectionId.equals(action.optString("connectionId"))) {
-                    syncSessionId = action.getString("sessionId");
-                    syncAuthorized = true;
-                    status = "REM session " + syncSessionId + " authorized for display writes";
-                } else { syncAuthorized = false; syncSessionId = ""; }
+                    String authorized = action.getString("sessionId");
+                    authorizedSessions.add(authorized);
+                    status = "REM session " + authorized + " authorized for display writes";
+                }
                 break;
-            case "cancelWrites": syncAuthorized = false; syncSessionId = ""; discardWrites(); break;
+            case "sessionEnded":
+                // A frame of that session already on the radio completes and is ignored natively.
+                authorizedSessions.remove(action.getString("sessionId"));
+                status = "REM session " + action.getString("sessionId") + " ended: " + action.optString("reason")
+                    + ". Its slots are released; the device display is not cleared";
+                break;
+            case "cancelWrites": authorizedSessions.clear(); discardWrites(); break;
             case "cancelHostRequests":
                 Set<String> keep = new HashSet<>();
                 JSONArray ids = action.getJSONArray("keepRequestIds");
                 for (int i = 0; i < ids.length(); i++) keep.add(ids.getString(i));
                 requests.retain(keep);
                 break;
-            case "disconnect": syncAuthorized = false; syncSessionId = ""; discardWrites(); ble.close("Native session requested disconnect"); break;
+            case "disconnect": authorizedSessions.clear(); discardWrites(); ble.close("Native session requested disconnect"); break;
             default: status = "Unsupported native action rejected";
         }
     }
@@ -400,7 +457,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
         call(request);
     }
     @Override public void disconnected(String reason) {
-        syncAuthorized = false;
+        authorizedSessions.clear();
         captureActive = false;
         call(command("disconnected", "reason", reason));
         cancelWrites();

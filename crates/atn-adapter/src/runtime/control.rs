@@ -1,6 +1,6 @@
 use super::{
-    Adapter, AdapterConfig, Capture, HostOutcome, OP_SESSION_LIST, OP_SYMBOLS_LIST, Purpose,
-    REQUIRED_API_MINOR, Resolution, Value, decode, integer, json, text,
+    Adapter, AdapterConfig, Capture, HostOutcome, OP_SYMBOLS_LIST, Purpose, REQUIRED_API_MINOR,
+    Resolution, Value, decode, integer, json, text,
 };
 
 impl Adapter {
@@ -164,8 +164,7 @@ impl Adapter {
                 let config: AdapterConfig = decode(v, "config")?;
                 config.validate()?;
                 self.end_capture("configuration changed", actions);
-                self.cancel_session("configuration changed");
-                self.end_session_on_host(now, actions);
+                self.end_all_displays("configuration changed", true, now, actions);
                 self.drop_observation_requests("configuration changed before host answered");
                 self.pending
                     .retain(|_, p| matches!(p.purpose, Purpose::SessionStop(_)));
@@ -179,7 +178,9 @@ impl Adapter {
             }
             "hostStarted" => {
                 self.end_capture("host restarted", actions);
-                self.cancel_session("host restarted");
+                // The previous Binder host session is gone; it cannot be told.
+                self.end_all_displays("host restarted", false, now, actions);
+                self.last_reconcile_ms = None;
                 self.drop_observation_requests("host restarted before answering");
                 self.pending.clear();
                 self.cancel_host_actions(actions);
@@ -203,7 +204,9 @@ impl Adapter {
                 self.drop_observation_requests("host stopped before answering");
                 self.pending.clear();
                 self.cancel_host_actions(actions);
-                self.cancel_session("host stopped");
+                self.end_all_displays("host stopped", false, now, actions);
+                self.in_flight = None;
+                self.last_reconcile_ms = None;
                 self.terminal_sessions.clear();
                 actions.push(json!({"kind":"cancelWrites"}));
                 actions.push(json!({"kind":"disconnect"}));
@@ -223,15 +226,18 @@ impl Adapter {
         match cmd {
             "connected" => {
                 self.end_capture("new BLE connection", actions);
-                self.cancel_session("new BLE connection");
-                self.end_session_on_host(now, actions);
+                self.end_all_displays("new BLE connection", true, now, actions);
+                self.in_flight = None;
                 self.observer = None;
                 self.colocation = None;
                 self.drop_observation_requests("connection changed before host answered");
                 self.pending.retain(|_, p| {
                     matches!(
                         p.purpose,
-                        Purpose::Symbols | Purpose::SessionList | Purpose::SessionStop(_)
+                        Purpose::Symbols
+                            | Purpose::SessionList(_)
+                            | Purpose::SessionStop(_)
+                            | Purpose::Notify
                     )
                 });
                 self.cancel_host_actions(actions);
@@ -249,13 +255,16 @@ impl Adapter {
                 self.connection = None;
                 self.observer = None;
                 self.colocation = None;
-                self.cancel_session("BLE disconnected");
-                self.end_session_on_host(now, actions);
+                self.end_all_displays("BLE disconnected", true, now, actions);
+                self.in_flight = None;
                 self.drop_observation_requests("disconnected before host answered");
                 self.pending.retain(|_, p| {
                     matches!(
                         p.purpose,
-                        Purpose::Symbols | Purpose::SessionList | Purpose::SessionStop(_)
+                        Purpose::Symbols
+                            | Purpose::SessionList(_)
+                            | Purpose::SessionStop(_)
+                            | Purpose::Notify
                     )
                 });
                 self.cancel_host_actions(actions);
@@ -284,14 +293,8 @@ impl Adapter {
                 }
                 self.colocation = Some(evidence.to_owned());
                 self.observer = None;
-                if self.host_ready && !self.pending_purpose(|p| matches!(p, Purpose::SessionList)) {
-                    self.request(
-                        Purpose::SessionList,
-                        OP_SESSION_LIST,
-                        json!({}),
-                        now,
-                        actions,
-                    )?;
+                if self.host_ready {
+                    self.request_session_list(now, actions)?;
                 }
                 Ok(self.status())
             }
@@ -299,8 +302,7 @@ impl Adapter {
                 self.end_capture("co-location confirmation withdrawn", actions);
                 self.colocation = None;
                 self.observer = None;
-                self.cancel_session("co-location confirmation withdrawn");
-                self.end_session_on_host(now, actions);
+                self.end_all_displays("co-location confirmation withdrawn", true, now, actions);
                 actions.push(json!({"kind":"cancelWrites"}));
                 Ok(self.status())
             }
@@ -316,60 +318,9 @@ impl Adapter {
         actions: &mut Vec<Value>,
     ) -> Result<Value, String> {
         match cmd {
-            "transportResult" => {
-                let context_matches = self.connection.as_ref().is_some_and(|(id, _)| {
-                    v.get("connectionId").and_then(Value::as_str) == Some(id.as_str())
-                }) && self.session.as_ref().is_some_and(|s| {
-                    v.get("sessionId").and_then(Value::as_str)
-                        == Some(s.snapshot().session_id.as_str())
-                });
-                if !context_matches {
-                    return Ok(json!({"ignored":"stale transport callback"}));
-                }
-                let id = integer(v, "operationId")?;
-                let number =
-                    usize::try_from(integer(v, "frameNumber")?).map_err(|e| e.to_string())?;
-                if !v
-                    .get("completed")
-                    .and_then(Value::as_bool)
-                    .ok_or("completed boolean required")?
-                {
-                    return Err("transport failed; explicit new session required".into());
-                }
-                let report = self
-                    .session
-                    .as_mut()
-                    .ok_or("no session")?
-                    .transport_completed(id, number, now)
-                    .map_err(|e| e.to_string())?;
-                self.pump(now, actions)?;
-                Ok(json!(report))
-            }
-            "confirmDisplay" => {
-                let id = integer(v, "operationId")?;
-                let evidence = text(v, "evidenceId")?.into();
-                let report = self
-                    .session
-                    .as_mut()
-                    .ok_or("no session")?
-                    .confirm_display(id, evidence)
-                    .map_err(|e| e.to_string())?;
-                Ok(json!(report))
-            }
-            "setIcon" => {
-                self.write_gate(now)?;
-                let bytes: Vec<u8> = decode(v, "png")?;
-                let c = self.config.as_ref().ok_or("configuration required")?;
-                let capacity = self.connection.as_ref().ok_or("BLE disconnected")?.1;
-                let id = self
-                    .session
-                    .as_mut()
-                    .ok_or("no session")?
-                    .enqueue_icon(text(v, "pleId")?, &bytes, capacity, c.png_limits, now)
-                    .map_err(|e| e.to_string())?;
-                self.pump(now, actions)?;
-                Ok(json!({"operationId":id}))
-            }
+            "transportResult" => self.transport_result(v, now, actions),
+            "confirmDisplay" => self.confirm_display(v),
+            "setIcon" => self.set_icon(v, now, actions),
             "setStyle" => {
                 self.write_gate(now)?;
                 let marker_type =
@@ -381,7 +332,7 @@ impl Adapter {
                 let c = self.config.as_mut().ok_or("configuration required")?;
                 c.marker_type = marker_type;
                 c.color = color;
-                self.refresh_selected(now, actions)?;
+                self.refresh_selected(None, now, actions)?;
                 Ok(self.status())
             }
             _ => Err(format!("unknown command {cmd}")),
@@ -391,30 +342,42 @@ impl Adapter {
     pub(super) fn session_control(
         &mut self,
         cmd: &str,
-        _v: &Value,
+        v: &Value,
         now: u64,
         actions: &mut Vec<Value>,
     ) -> Result<Value, String> {
         match cmd {
             "stopSync" => {
-                self.cancel_session("operator stopped display session");
-                self.end_session_on_host(now, actions);
-                self.pending.retain(|_, p| {
-                    !matches!(p.purpose, Purpose::Observer | Purpose::SessionObjects(_))
-                });
+                // With a `sessionId` only that session ends; without, all do.
+                if let Some(id) = v.get("sessionId").and_then(Value::as_str) {
+                    let id = id.to_owned();
+                    self.end_display(
+                        &id,
+                        "operator stopped display session",
+                        true,
+                        false,
+                        now,
+                        actions,
+                    );
+                    self.pending.retain(
+                        |_, p| !matches!(&p.purpose, Purpose::SessionObjects(s) if *s == id),
+                    );
+                } else {
+                    self.end_all_displays("operator stopped display session", true, now, actions);
+                    self.pending.retain(|_, p| {
+                        !matches!(p.purpose, Purpose::Observer | Purpose::SessionObjects(_))
+                    });
+                    actions.push(json!({"kind":"cancelWrites"}));
+                }
                 self.cancel_host_actions(actions);
-                actions.push(json!({"kind":"cancelWrites"}));
+                self.pump(now, actions)?;
                 Ok(self.status())
             }
             "tick" => {
                 self.expire_pending(now, actions)?;
                 self.replay_due(now, actions);
-                if let Some(session) = self.session.as_mut() {
-                    if matches!(session.snapshot().state, atn_domain::SessionState::Active) {
-                        session.tick(now).map_err(|e| e.to_string())?;
-                    }
-                }
-                if self.active_session_id().is_some() {
+                self.sessions_tick(now, actions)?;
+                if !self.displays.is_empty() {
                     let c = self.config.as_ref().ok_or("configuration required")?;
                     let half_life = c.eligibility.max_observer_age_ms / 2;
                     let refresh = self
@@ -463,7 +426,25 @@ impl Adapter {
                 Purpose::Observer => {
                     actions.push(json!({"kind":"status","message":"observer snapshot timed out; display writes held"}));
                 }
-                Purpose::Symbols | Purpose::SessionList | Purpose::SessionObjects(_) => {
+                Purpose::Notify => {
+                    actions.push(json!({"kind":"status","message":"REM notification timed out"}));
+                }
+                // The next reconciliation lists again; nothing ends meanwhile.
+                Purpose::SessionList(_) => {
+                    actions.push(json!({"kind":"status","message":"REM session list timed out"}));
+                }
+                // A session whose membership cannot be confirmed is ended.
+                Purpose::SessionObjects(session) => {
+                    self.end_display(
+                        &session,
+                        "REM session objects timed out",
+                        true,
+                        false,
+                        now,
+                        actions,
+                    );
+                }
+                Purpose::Symbols => {
                     hard = Some("host request timeout; map exchange unavailable");
                 }
             }

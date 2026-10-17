@@ -171,6 +171,27 @@ fn sync(a: &mut Adapter) -> Value {
         snapshot(0.0, 10000),
     )
 }
+/// An accepted session in a status-bearing result.
+fn session_in(v: &Value, id: &str) -> Value {
+    v["result"]["sessions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("sessions in {v}"))
+        .iter()
+        .find(|s| s["sessionId"] == id)
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+/// The latest snapshot of an ended session.
+fn ended_in(v: &Value, id: &str) -> Value {
+    v["result"]["endedSessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|s| s["sessionId"] == id)
+        .cloned()
+        .unwrap_or_else(|| panic!("ended session {id} in {v}"))
+}
 fn write(v: &Value) -> Value {
     v["actions"]
         .as_array()
@@ -364,7 +385,7 @@ fn unconfirmed_colocation_blocks_creation_and_rejects_sessions() {
     assert!(!has_action(&v, "sessionAuthorized"));
     let stop = request(&v, "map.session.stop");
     assert_eq!(stop["payload"]["sessionId"], "shared-early");
-    assert_eq!(v["result"]["session"], Value::Null);
+    assert_eq!(v["result"]["sessions"], json!([]));
     // The rejected ID is terminal even if REM re-reports it.
     let v = started(&mut a, "shared-early", &[object("p", 0.001, T1)]);
     assert!(requests(&v, "map.session.stop").is_empty());
@@ -446,7 +467,7 @@ fn session_allocates_slots_in_selection_order_and_writes() {
         "two",
         &[object("b", 0.001, T1), object("a", 0.002, T1)],
     );
-    let selected = v["result"]["session"]["selected"]
+    let selected = session_in(&v, "two")["selected"]
         .as_array()
         .unwrap()
         .clone();
@@ -471,19 +492,27 @@ fn session_allocates_slots_in_selection_order_and_writes() {
 }
 
 #[test]
-fn second_session_is_rejected_once_and_existing_session_is_untouched() {
+// Stage 3: a second session is now served alongside the first (it was
+// rejected while only one session was supported).
+fn second_session_gets_its_own_slots_and_existing_session_is_untouched() {
     let mut a = connected();
     ready(&mut a);
     let first = sync(&mut a);
     let w = write(&first);
     let v = started(&mut a, "second", &[object("other", 0.001, T1)]);
-    assert_eq!(requests(&v, "map.session.stop").len(), 1);
-    assert_eq!(v["result"]["session"]["sessionId"], "synthetic-session");
+    assert!(requests(&v, "map.session.stop").is_empty());
+    assert!(has_action(&v, "sessionAuthorized"));
     assert!(!has_action(&v, "cancelWrites"));
+    assert!(!has_action(&v, "write")); // the first session's frame is in flight
+    assert_eq!(session_in(&v, "second")["selected"][0]["slotId"], 3);
+    assert_eq!(
+        session_in(&v, "synthetic-session")["selected"][0]["slotId"],
+        2
+    );
     let v = started(&mut a, "second", &[object("other", 0.001, T1)]);
     assert!(requests(&v, "map.session.stop").is_empty());
     let v = transport_ok(&mut a, &w, 10000);
-    assert_eq!(v["result"]["transportComplete"], true);
+    assert_eq!(v["result"]["report"]["transportComplete"], true);
 }
 
 #[test]
@@ -496,7 +525,11 @@ fn exhausted_slot_pool_rejects_whole_session() {
         .collect();
     let v = started(&mut a, "five", &objects);
     assert_eq!(v["ok"], true);
-    assert_eq!(v["result"]["session"], Value::Null);
+    assert_eq!(v["result"]["sessions"], json!([]));
+    assert_eq!(
+        request(&v, "notifications.raise")["payload"]["body"],
+        "Share rejected: configured slot pool exhausted"
+    );
     assert_eq!(
         request(&v, "map.session.stop")["payload"]["sessionId"],
         "five"
@@ -537,8 +570,13 @@ fn session_events_update_remove_and_stop_within_scope() {
         json!({"cmd":"hostEvent","envelope":{"protocolVersion":1,"event":"map.session.object.removed","payload":{"sessionId":"synthetic-session","objectDestinationHash":"synthetic-ple"}}}),
     );
     assert_eq!(v["ok"], true, "{v}");
-    assert_eq!(v["result"]["session"]["state"]["state"], "stopped");
-    assert!(has_action(&v, "cancelWrites"));
+    assert_eq!(session_in(&v, "synthetic-session"), Value::Null);
+    assert_eq!(
+        ended_in(&v, "synthetic-session")["state"]["state"],
+        "stopped"
+    );
+    // Stage 3: one session ending no longer cancels other sessions' writes.
+    assert!(has_action(&v, "sessionEnded"));
     assert!(requests(&v, "map.session.stop").is_empty()); // REM already owns the removal
     let v = call(
         &mut a,
@@ -563,10 +601,12 @@ fn rem_stop_event_cancels_unsent_work_without_device_clear() {
         &mut a,
         json!({"cmd":"hostEvent","envelope":{"protocolVersion":1,"event":"map.session.stopped","payload":{"sessionId":"synthetic-session","reason":"capability-revoked"}}}),
     );
-    assert!(has_action(&v, "cancelWrites"));
+    // Stage 3: the per-session end replaces the global cancellation.
+    assert!(has_action(&v, "sessionEnded"));
     assert!(!has_action(&v, "write"));
     assert!(requests(&v, "map.session.stop").is_empty());
-    let state = &v["result"]["session"]["state"];
+    let ended = ended_in(&v, "synthetic-session");
+    let state = &ended["state"];
     assert_eq!(state["state"], "stopped");
     assert!(
         state["reason"]
@@ -574,7 +614,10 @@ fn rem_stop_event_cancels_unsent_work_without_device_clear() {
             .unwrap()
             .contains("capability-revoked")
     );
-    assert!(v["result"]["session"]["completed"][0]["cancelled"].is_string());
+    assert!(ended["completed"][0]["cancelled"].is_string());
+    let released = v["result"]["releasedSlots"].as_array().unwrap();
+    assert_eq!(released[0]["slotId"], 2);
+    assert_eq!(released[0]["deviceDisplayCleared"], false);
 }
 
 #[test]
@@ -606,7 +649,8 @@ fn dropped_started_event_is_recovered_from_session_list() {
         json!({"session":session("listed",&["synthetic-ple","gone"]),"objects":[object("synthetic-ple",0.001,T1)]}),
     );
     assert_eq!(v["ok"], true, "{v}");
-    let selected = v["result"]["session"]["selected"].as_array().unwrap();
+    let session = session_in(&v, "listed");
+    let selected = session["selected"].as_array().unwrap();
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[0]["pleId"], "synthetic-ple");
     assert_eq!(write(&v)["bytes"][2], 4);
@@ -634,8 +678,8 @@ fn unknown_session_answer_ends_local_session() {
     );
     let v = fail(&mut a, &request(&v, "map.session.objects.get"), "NotFound");
     assert_eq!(v["ok"], true);
-    assert_eq!(v["result"]["session"]["state"]["state"], "stopped");
-    assert!(has_action(&v, "cancelWrites"));
+    assert_eq!(ended_in(&v, "listed")["state"]["state"], "stopped");
+    assert!(has_action(&v, "sessionEnded"));
 }
 
 #[test]
@@ -774,8 +818,8 @@ fn early_reply_and_platform_completion_remain_separate() {
     assert_eq!(v["result"]["report"]["transportComplete"], false);
     assert_eq!(v["result"]["report"]["reply"]["answer_signed"], 3);
     let v = transport_ok(&mut a, &w, 10000);
-    assert_eq!(v["result"]["transportComplete"], true);
-    assert_eq!(v["result"]["displayConfirmation"], Value::Null);
+    assert_eq!(v["result"]["report"]["transportComplete"], true);
+    assert_eq!(v["result"]["report"]["displayConfirmation"], Value::Null);
 }
 
 #[test]
@@ -796,15 +840,19 @@ fn style_changes_queue_position_and_icon_is_selected_only() {
     let png = include_bytes!("../../../atn-rangefinder-docs/fixtures/synthetic-icon.png").to_vec();
     let v = call(
         &mut a,
-        json!({"cmd":"setIcon","pleId":"synthetic-ple","png":png}),
+        json!({"cmd":"setIcon","sessionId":"synthetic-session","pleId":"synthetic-ple","png":png}),
     );
     assert_eq!(v["ok"], true);
+    assert_eq!(v["result"]["accepted"], true);
     assert!(!has_action(&v, "write")); // waits for position reply, separate operation
     let v = call(
         &mut a,
-        json!({"cmd":"setIcon","pleId":"not-selected","png":png}),
+        json!({"cmd":"setIcon","sessionId":"synthetic-session","pleId":"not-selected","png":png}),
     );
-    assert_eq!(v["ok"], false);
+    // Stage 3: a mistyped object is refused without ending every session.
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["result"]["accepted"], false);
+    assert!(!has_action(&v, "cancelWrites"));
 }
 
 #[test]
@@ -823,15 +871,16 @@ fn removing_a_queued_selected_point_preserves_another_active_write() {
         snapshot(0.0, 10000),
     );
     assert_eq!(write(&v)["bytes"][2], 4);
-    assert_eq!(v["result"]["session"]["queuedOperations"], 1);
+    assert_eq!(session_in(&v, "two-selected")["queuedOperations"], 1);
     let v = call(
         &mut a,
         json!({"cmd":"hostEvent","envelope":{"protocolVersion":1,"event":"map.session.object.removed","payload":{"sessionId":"two-selected","objectDestinationHash":"b"}}}),
     );
     assert!(!has_action(&v, "write"));
     assert!(!has_action(&v, "cancelWrites"));
-    assert_eq!(v["result"]["session"]["active"]["pleId"], "a");
-    assert_eq!(v["result"]["session"]["queuedOperations"], 0);
+    let session = session_in(&v, "two-selected");
+    assert_eq!(session["active"]["pleId"], "a");
+    assert_eq!(session["queuedOperations"], 0);
 }
 
 #[test]
@@ -929,11 +978,11 @@ fn moving_observer_replaces_unsent_geometry_before_next_transfer() {
         &mut a,
         json!({"cmd":"hostEvent","nowMs":10500,"envelope":{"protocolVersion":1,"event":"map.session.object.updated","payload":{"sessionId":"synthetic-session","reason":"moved","object":object("synthetic-ple",0.002,T2)}}}),
     );
-    assert_eq!(v["result"]["session"]["queuedOperations"], 1);
+    assert_eq!(session_in(&v, "synthetic-session")["queuedOperations"], 1);
     let v = call(&mut a, json!({"cmd":"tick","nowMs":10500}));
     let refresh = request(&v, "map.observer.snapshot");
     let v = respond_at(&mut a, &refresh, snapshot(0.0005, 10500), 10500);
-    assert_eq!(v["result"]["session"]["queuedOperations"], 1);
+    assert_eq!(session_in(&v, "synthetic-session")["queuedOperations"], 1);
     transport_ok(&mut a, &first, 10500);
     let v = call(
         &mut a,
@@ -1282,4 +1331,479 @@ fn retry_delay_is_explicit_configuration() {
         call(&mut a, json!({"cmd":"configure","config":c}))["ok"],
         false
     );
+}
+
+fn connected_with_pool(pool: &[u16]) -> Adapter {
+    let mut a = Adapter::new();
+    let mut c = config();
+    c["slotPool"] = json!(pool);
+    assert_eq!(
+        call(&mut a, json!({"cmd":"configure","config":c}))["ok"],
+        true
+    );
+    call(
+        &mut a,
+        json!({"cmd":"connected","connectionId":"synthetic-connection","writeCapacity":509}),
+    );
+    ready(&mut a);
+    colocate(&mut a);
+    a
+}
+fn reply(a: &mut Adapter, now: u64) -> Value {
+    call(
+        a,
+        json!({"cmd":"notification","nowMs":now,"bytes":[1,2,3,0,0,0],"observedAtMs":now}),
+    )
+}
+/// Completes the position write found in `v` (transport, then reply).
+fn complete(a: &mut Adapter, v: &Value) -> Value {
+    let w = write(v);
+    let t = transport_ok(a, &w, 10000);
+    assert_eq!(t["ok"], true, "{t}");
+    reply(a, 10000)
+}
+fn slot_byte(w: &Value) -> u64 {
+    w["bytes"][2].as_u64().unwrap()
+}
+fn stopped_event(a: &mut Adapter, id: &str, reason: &str) -> Value {
+    call(
+        a,
+        json!({"cmd":"hostEvent","envelope":{"protocolVersion":1,"event":"map.session.stopped","payload":{"sessionId":id,"reason":reason}}}),
+    )
+}
+
+#[test]
+fn four_concurrent_sessions_share_one_serialized_queue() {
+    let mut a = connected_with_pool(&[2, 3, 4, 5, 6, 7]);
+    let v = started(&mut a, "s1", &[object("p1", 0.001, T1)]);
+    let v = respond(
+        &mut a,
+        &request(&v, "map.observer.snapshot"),
+        snapshot(0.0, 10000),
+    );
+    let first = write(&v);
+    assert_eq!(slot_byte(&first), 4);
+    for (id, point) in [("s2", "p2"), ("s3", "p3"), ("s4", "p4")] {
+        let v = started(&mut a, id, &[object(point, 0.001, T1)]);
+        assert!(has_action(&v, "sessionAuthorized"), "{v}");
+        assert!(!has_action(&v, "write")); // one frame in flight device-wide
+        assert!(!has_action(&v, "cancelWrites"));
+    }
+    let v = started(&mut a, "s5", &[object("p5", 0.001, T1)]);
+    assert!(!has_action(&v, "sessionAuthorized"));
+    assert_eq!(
+        request(&v, "map.session.stop")["payload"]["sessionId"],
+        "s5"
+    );
+    assert!(
+        request(&v, "notifications.raise")["payload"]["body"]
+            .as_str()
+            .unwrap()
+            .contains("session limit")
+    );
+    let status = call(&mut a, json!({"cmd":"status"}));
+    let sessions = status["result"]["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 4);
+    assert_eq!(status["result"]["freeSlots"], json!([6, 7]));
+    // The reply belongs to s1; only then may the next session write.
+    let v = transport_ok(&mut a, &first, 10000);
+    assert!(!has_action(&v, "write"));
+    let mut seen = vec![slot_byte(&first)];
+    let mut v = reply(&mut a, 10000);
+    for _ in 0..3 {
+        let w = write(&v);
+        seen.push(slot_byte(&w));
+        transport_ok(&mut a, &w, 10000);
+        v = reply(&mut a, 10000);
+    }
+    assert_eq!(seen, vec![4, 6, 8, 10]);
+    assert!(!has_action(&v, "write"));
+}
+
+#[test]
+fn overlapping_selection_gets_separate_slots_per_session() {
+    let mut a = connected_with_pool(&[2, 3, 4, 5]);
+    let v = started(
+        &mut a,
+        "first",
+        &[object("x", 0.001, T1), object("y", 0.002, T1)],
+    );
+    let v = respond(
+        &mut a,
+        &request(&v, "map.observer.snapshot"),
+        snapshot(0.0, 10000),
+    );
+    let v = complete(&mut a, &v);
+    let v = complete(&mut a, &v);
+    assert!(!has_action(&v, "write"));
+    let v = started(&mut a, "second", &[object("y", 0.002, T1)]);
+    let second = session_in(&v, "second");
+    assert_eq!(second["selected"][0]["pleId"], "y");
+    assert_eq!(second["selected"][0]["slotId"], 4);
+    let first = session_in(&v, "first");
+    assert_eq!(first["selected"].as_array().unwrap().len(), 2);
+    // The same object is written again for the second session's own slot.
+    assert_eq!(slot_byte(&write(&v)), 8);
+    assert_eq!(write(&v)["sessionId"], "second");
+}
+
+#[test]
+fn exhausted_pool_rejects_only_the_new_session_and_released_slots_are_reused() {
+    let mut a = connected_with_pool(&[2, 3, 4]);
+    let objects: Vec<Value> = (0..3)
+        .map(|i| object(&format!("p{i}"), 0.001, T1))
+        .collect();
+    let v = started(&mut a, "big", &objects);
+    assert!(has_action(&v, "sessionAuthorized"));
+    respond(
+        &mut a,
+        &request(&v, "map.observer.snapshot"),
+        snapshot(0.0, 10000),
+    );
+    let v = started(
+        &mut a,
+        "late",
+        &[object("q0", 0.001, T1), object("q1", 0.001, T1)],
+    );
+    assert!(!has_action(&v, "sessionAuthorized"));
+    assert!(!has_action(&v, "sessionEnded"));
+    assert!(!has_action(&v, "cancelWrites"));
+    assert_eq!(requests(&v, "map.session.stop").len(), 1);
+    assert_eq!(requests(&v, "notifications.raise").len(), 1);
+    assert_eq!(
+        session_in(&v, "big")["selected"].as_array().unwrap().len(),
+        3
+    );
+    assert_eq!(session_in(&v, "late"), Value::Null);
+    // A denied notification is status only.
+    let v = fail(
+        &mut a,
+        &request(&v, "notifications.raise"),
+        "PermissionDenied",
+    );
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["result"]["hostReady"], true);
+    assert!(!has_action(&v, "cancelWrites"));
+    let v = started(&mut a, "late", &[object("q0", 0.001, T1)]);
+    assert!(requests(&v, "map.session.stop").is_empty()); // terminal
+    let v = stopped_event(&mut a, "big", "operator");
+    let released: Vec<u64> = v["result"]["releasedSlots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            assert_eq!(r["deviceDisplayCleared"], false);
+            r["slotId"].as_u64().unwrap()
+        })
+        .collect();
+    assert_eq!(released, vec![2, 3, 4]);
+    let v = started(
+        &mut a,
+        "next",
+        &[object("q0", 0.001, T1), object("q1", 0.001, T1)],
+    );
+    assert!(has_action(&v, "sessionAuthorized"));
+    let slots: Vec<u64> = session_in(&v, "next")["selected"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["slotId"].as_u64().unwrap())
+        .collect();
+    assert_eq!(slots.len(), 2);
+    assert!(slots.iter().all(|s| [2, 3].contains(s)));
+}
+
+#[test]
+fn reconciliation_discovers_dropped_started_event() {
+    let mut a = connected();
+    ready(&mut a);
+    colocate(&mut a);
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":14999}));
+    assert!(requests(&v, "map.session.list").is_empty());
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":15000}));
+    let list = request(&v, "map.session.list");
+    let v = respond_at(
+        &mut a,
+        &list,
+        json!({"items":[session("dropped",&["p"])]}),
+        15000,
+    );
+    assert!(has_action(&v, "sessionAuthorized"));
+    assert_eq!(
+        request(&v, "map.session.objects.get")["payload"]["sessionId"],
+        "dropped"
+    );
+}
+
+#[test]
+fn reordered_and_duplicate_events_never_reauthorize_or_rewrite() {
+    let mut a = connected();
+    ready(&mut a);
+    colocate(&mut a);
+    let v = call(
+        &mut a,
+        json!({"cmd":"hostEvent","envelope":{"protocolVersion":1,"event":"map.session.object.updated","payload":{"sessionId":"early","reason":"moved","object":object("p",0.002,T2)}}}),
+    );
+    assert_eq!(v["result"]["ignored"], "different session");
+    stopped_event(&mut a, "early", "operator");
+    let v = started(&mut a, "early", &[object("p", 0.001, T1)]);
+    assert!(!has_action(&v, "sessionAuthorized"));
+    assert!(requests(&v, "map.session.stop").is_empty());
+    let v = sync(&mut a);
+    let v = complete(&mut a, &v);
+    assert!(!has_action(&v, "write"));
+    let v = started(
+        &mut a,
+        "synthetic-session",
+        &[object("synthetic-ple", 0.001, T1)],
+    );
+    assert_eq!(v["ok"], true);
+    assert!(!has_action(&v, "sessionAuthorized"));
+    assert!(!has_action(&v, "write"));
+}
+
+/// Session with every write completed; observer captured at 10000.
+fn settled(a: &mut Adapter, objects: &[Value]) {
+    let v = started(a, "settled", objects);
+    let mut v = respond(
+        a,
+        &request(&v, "map.observer.snapshot"),
+        snapshot(0.0, 10000),
+    );
+    while has_action(&v, "write") {
+        v = complete(a, &v);
+    }
+}
+/// Tick at 15000: fresh observer, then the session list answer.
+fn reconcile(a: &mut Adapter, items: &Value) -> Value {
+    let v = call(a, json!({"cmd":"tick","nowMs":15000}));
+    let list = request(&v, "map.session.list");
+    let observer = request(&v, "map.observer.snapshot");
+    let o = respond_at(a, &observer, snapshot(0.0, 15000), 15000);
+    assert!(!has_action(&o, "write"), "{o}"); // same geometry
+    respond_at(a, &list, items.clone(), 15000)
+}
+
+#[test]
+fn unchanged_reconciliation_produces_no_write() {
+    let mut a = connected();
+    ready(&mut a);
+    colocate(&mut a);
+    settled(&mut a, &[object("p", 0.001, T1)]);
+    let v = reconcile(&mut a, &json!({"items":[session("settled",&["p"])]}));
+    let get = request(&v, "map.session.objects.get");
+    let v = respond_at(
+        &mut a,
+        &get,
+        json!({"session":session("settled",&["p"]),"objects":[object("p",0.001,T1)]}),
+        15000,
+    );
+    assert_eq!(v["ok"], true, "{v}");
+    assert!(!has_action(&v, "write"));
+    assert_eq!(session_in(&v, "settled")["selected"][0]["pleId"], "p");
+    // Fresh snapshot: the next list inside the interval fetches nothing.
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":19999}));
+    assert!(requests(&v, "map.session.list").is_empty());
+}
+
+#[test]
+fn objects_get_omission_removes_only_the_missing_object() {
+    let mut a = connected();
+    ready(&mut a);
+    colocate(&mut a);
+    settled(
+        &mut a,
+        &[object("keep", 0.001, T1), object("gone", 0.002, T1)],
+    );
+    let v = reconcile(
+        &mut a,
+        &json!({"items":[session("settled",&["keep","gone"])]}),
+    );
+    let get = request(&v, "map.session.objects.get");
+    let v = respond_at(
+        &mut a,
+        &get,
+        json!({"session":session("settled",&["keep","gone"]),"objects":[object("keep",0.001,T1)]}),
+        15000,
+    );
+    let session = session_in(&v, "settled");
+    assert_eq!(session["selected"].as_array().unwrap().len(), 1);
+    assert_eq!(session["selected"][0]["pleId"], "keep");
+    let released = v["result"]["releasedSlots"].as_array().unwrap();
+    assert_eq!(released.last().unwrap()["pleId"], "gone");
+    assert!(!has_action(&v, "write"));
+}
+
+#[test]
+fn session_missing_from_list_ends_without_stop_and_newer_session_survives() {
+    let mut a = connected();
+    ready(&mut a);
+    colocate(&mut a);
+    settled(&mut a, &[object("p", 0.001, T1)]);
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":15000}));
+    let list = request(&v, "map.session.list");
+    // Accepted after the list request was sent: not judged by that answer.
+    let v = call(
+        &mut a,
+        json!({"cmd":"hostEvent","nowMs":15001,"envelope":{"protocolVersion":1,"event":"map.session.started",
+            "payload":{"sessionId":"newer","pluginId":"org.freetak.atn","objectDestinationHashes":["q"],"startedAtMs":15001,"startedBy":"operator","objects":[object("q",0.001,T1)]}}}),
+    );
+    assert!(has_action(&v, "sessionAuthorized"), "{v}");
+    let v = respond_at(&mut a, &list, json!({"items":[]}), 15001);
+    assert_eq!(v["ok"], true, "{v}");
+    assert!(requests(&v, "map.session.stop").is_empty());
+    assert!(has_action(&v, "sessionEnded"));
+    assert_eq!(session_in(&v, "settled"), Value::Null);
+    assert_ne!(session_in(&v, "newer"), Value::Null);
+    assert!(
+        v["result"]["terminalSessions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("settled"))
+    );
+}
+
+#[test]
+fn echo_for_an_ended_session_frees_the_device_but_advances_nothing() {
+    let mut a = connected();
+    ready(&mut a);
+    let v = sync(&mut a);
+    let old = write(&v);
+    let v = started(&mut a, "other", &[object("q", 0.001, T1)]);
+    assert!(!has_action(&v, "write"));
+    let v = stopped_event(&mut a, "synthetic-session", "operator");
+    assert!(has_action(&v, "sessionEnded"));
+    assert!(!has_action(&v, "write")); // its frame is still on the radio
+    // A forged echo naming the live session cannot complete anything.
+    let v = call(
+        &mut a,
+        json!({"cmd":"transportResult","sessionId":"other","connectionId":"synthetic-connection","operationId":old["operationId"],"frameNumber":1,"completed":true}),
+    );
+    assert_eq!(v["result"]["ignored"], "stale transport callback");
+    assert!(!has_action(&v, "write"));
+    let v = transport_ok(&mut a, &old, 10000);
+    assert_eq!(
+        v["result"]["ignored"],
+        "transport callback for ended session"
+    );
+    let next = write(&v);
+    assert_eq!(next["sessionId"], "other");
+    let other = session_in(&call(&mut a, json!({"cmd":"status"})), "other");
+    assert_eq!(other["active"]["transportComplete"], false);
+    // After reconnecting, an echo from the old connection is ignored.
+    call(&mut a, json!({"cmd":"disconnected"}));
+    call(
+        &mut a,
+        json!({"cmd":"connected","connectionId":"fresh","writeCapacity":509}),
+    );
+    let v = transport_ok(&mut a, &next, 10000);
+    assert_eq!(v["result"]["ignored"], "stale transport callback");
+}
+
+/// One settled session plus a second one, with an icon frame on the radio.
+fn partial_icon(a: &mut Adapter) -> Value {
+    let v = sync(a);
+    let v = complete(a, &v);
+    assert!(!has_action(&v, "write"));
+    let v = started(a, "bystander", &[object("q", 0.001, T1)]);
+    let v = complete(a, &v);
+    assert!(!has_action(&v, "write"));
+    let png = include_bytes!("../../../atn-rangefinder-docs/fixtures/synthetic-icon.png").to_vec();
+    let v = call(
+        a,
+        json!({"cmd":"setIcon","sessionId":"synthetic-session","pleId":"synthetic-ple","png":png}),
+    );
+    assert_eq!(v["result"]["accepted"], true, "{v}");
+    let w = write(&v);
+    assert_eq!(w["sessionId"], "synthetic-session");
+    w
+}
+fn assert_invalidated(a: &mut Adapter, v: &Value, frame: &Value) {
+    assert!(has_action(v, "disconnect"), "{v}");
+    assert!(has_action(v, "cancelWrites"));
+    let status = call(a, json!({"cmd":"status"}))["result"].clone();
+    assert_eq!(status["sessions"], json!([]));
+    assert_eq!(status["connected"], false);
+    // No further frames, no replay of the icon.
+    let v = transport_ok(a, frame, 10000);
+    assert_eq!(v["result"]["ignored"], "stale transport callback");
+    assert!(!has_action(&v, "write"));
+    // No slot is reused before an explicit reconnect and a new Share.
+    let v = started(a, "too-early", &[object("r", 0.001, T1)]);
+    assert!(!has_action(&v, "sessionAuthorized"));
+    call(
+        a,
+        json!({"cmd":"connected","connectionId":"after","writeCapacity":509}),
+    );
+    colocate(a);
+    let v = started(a, "bystander", &[object("q", 0.001, T1)]);
+    assert!(!has_action(&v, "sessionAuthorized")); // terminal
+    let v = started(a, "fresh-share", &[object("q", 0.001, T1)]);
+    assert!(has_action(&v, "sessionAuthorized"));
+}
+
+#[test]
+fn partial_icon_then_session_stop_invalidates_every_session() {
+    let mut a = connected();
+    ready(&mut a);
+    let frame = partial_icon(&mut a);
+    let v = stopped_event(&mut a, "synthetic-session", "operator");
+    let stops: Vec<Value> = requests(&v, "map.session.stop")
+        .into_iter()
+        .map(|r| r["payload"]["sessionId"].clone())
+        .collect();
+    assert_eq!(stops, vec![json!("bystander")]);
+    assert_invalidated(&mut a, &v, &frame);
+}
+
+#[test]
+fn partial_icon_then_revocation_invalidates_every_session() {
+    let mut a = connected();
+    ready(&mut a);
+    let frame = partial_icon(&mut a);
+    let v = stopped_event(&mut a, "bystander", "capability-revoked");
+    assert!(!has_action(&v, "disconnect")); // bystander had no transfer
+    // Revocation surfacing as a typed denial on the next host request.
+    let v = call(
+        &mut a,
+        json!({"cmd":"confirmColocation","evidenceId":"operator at binocular"}),
+    );
+    let v = fail(&mut a, &request(&v, "map.session.list"), "PermissionDenied");
+    assert_eq!(v["ok"], false);
+    assert_invalidated_after_error(&mut a, &v, &frame);
+}
+fn assert_invalidated_after_error(a: &mut Adapter, v: &Value, frame: &Value) {
+    assert!(has_action(v, "disconnect"), "{v}");
+    let status = call(a, json!({"cmd":"status"}))["result"].clone();
+    assert_eq!(status["sessions"], json!([]));
+    assert_eq!(status["connected"], false);
+    let v = transport_ok(a, frame, 10000);
+    assert_eq!(v["result"]["ignored"], "stale transport callback");
+}
+
+#[test]
+fn partial_icon_then_disconnect_needs_new_share_after_reconnect() {
+    let mut a = connected();
+    ready(&mut a);
+    let frame = partial_icon(&mut a);
+    let v = call(&mut a, json!({"cmd":"disconnected"}));
+    assert_eq!(requests(&v, "map.session.stop").len(), 2);
+    let status = call(&mut a, json!({"cmd":"status"}))["result"].clone();
+    assert_eq!(status["sessions"], json!([]));
+    let v = transport_ok(&mut a, &frame, 10000);
+    assert_eq!(v["result"]["ignored"], "stale transport callback");
+    let v = started(&mut a, "too-early", &[object("r", 0.001, T1)]);
+    assert!(!has_action(&v, "sessionAuthorized"));
+}
+
+#[test]
+fn partial_icon_timing_out_closes_the_transport() {
+    let mut a = connected();
+    ready(&mut a);
+    let frame = partial_icon(&mut a);
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":12999}));
+    assert!(!has_action(&v, "disconnect"));
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":13000}));
+    assert_eq!(v["ok"], true, "{v}");
+    assert_invalidated(&mut a, &v, &frame);
 }

@@ -139,3 +139,53 @@ Status after Stage 2: **implemented but unproven**. Not performed: a real REM 1.
 real `map.markers.create` replay behaviour and marker visibility, Binder death/timeout on a device,
 Android UI interaction on a phone, and any ATN hardware. Remaining: Stage 3 (concurrent sessions,
 reconciliation interval, `notifications.raise`), Stage 4 notes, hardware qualification.
+
+## Selected-object display synchronization (2026-10-17, Stage 3 of `docs/goals/atn-rem-plugin/plan.md`)
+
+- `crates/atn-adapter`: up to four concurrent REM selection sessions, each with its own
+  `atn-domain` `SyncSession`, allocated atomically to the first free `slotPool` slots in REM's
+  `objectDestinationHashes` order (one slot per session for an object shared twice). A session
+  that does not fit or fails a readiness gate is rejected alone: nothing allocated, others
+  untouched, one `map.session.stop`, one best-effort `notifications.raise {title, body}`, terminal
+  ID. One device-wide scheduler keeps a single transfer and frame in flight, routes replies to it
+  and round-robins sessions; echoes must match the in-flight connection/session/operation/frame,
+  and an echo for an ended session only frees the device. Ending a session emits `sessionEnded`
+  and records `releasedSlots` with `deviceDisplayCleared:false`. A partial icon transfer cut off by
+  any end closes GATT and ends every session. New required `reconcileIntervalMs` drives periodic
+  `map.session.list` (sessions accepted before the request and absent from it end without
+  `map.session.stop`) and `map.session.objects.get` for stale or event-touched sessions; unchanged
+  objects write nothing. `stopSync` takes an optional `sessionId`; `setIcon` and `confirmDisplay`
+  take `sessionId` and refuse unknown sessions/objects without ending anything.
+- `crates/atn-domain`: read-only `SyncSession` accessors (`active_transfer`, `queued_operations`,
+  `is_active`, `session_id`, `slot_of`); behaviour unchanged.
+- Android: manifest declares `notificationsRaise`; the service admits writes per authorized
+  session, handles `sessionEnded`, lists sessions with slots and per-session transport, reply and
+  display-confirmation state plus released slots, and passes the REM session ID for stop, icon and
+  display confirmation. All JNI calls stay on the one handler.
+- Docs: `docs/map-contract.md` sessions section (replaces "one session at a time"),
+  `docs/configuration.md`, `android/README.md`, handoff; `examples/synthetic-config.json` gained
+  `reconcileIntervalMs`.
+
+Local checks on 2026-10-17: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (54 synthetic
+exchange tests, 13 of them new for four concurrent sessions, overlapping selections, an exhausted
+pool rejecting only the new session with slot reuse after release, dropped `started` discovered by
+reconciliation, reordered/duplicate events and terminal IDs, unchanged reconciliation writing
+nothing, `objects.get` omission, a session missing from the list, ended-session and
+old-connection echoes, and partial icon transfers followed by session stop, revocation,
+disconnect and timeout; 24 domain tests, 1 new; 1 parser test and the remaining workspace crates'
+tests) and `bash scripts/test-jni.sh` (PASS) passed. Twelve existing exchange tests were adjusted,
+each with a comment where behaviour changed: status now reports `sessions`/`endedSessions`, a
+single session ending emits `sessionEnded` instead of `cancelWrites`, a second share is served
+instead of rejected, and a refused `setIcon` no longer ends the session.
+`scripts/build-android.sh --offline` (ARM64, NDK 27.0.12077973, Gradle 8.11.1, AGP 8.7.2, SDK AAR
+SHA-256 `db90e2ecb239765c418ec471aee0f8a27e97c4e85ec048229d9d88ec0ff5fb29` from REM
+`91124cffd8f7fa7df94684b672c2228d97f0522d`, `REM_HOST_PACKAGE=network.reticulum.emergency`)
+passed: 4 JVM scheduler tests, lint with no issues, debug APK SHA-256
+`9bdfc4086f24b8567125b4e84ea5e770b1424dd44eaa0609c0ca12c228ed317c`, built with the synthetic
+all-zero host fingerprint, which cannot authenticate a real REM host.
+
+Status after Stage 3: **implemented but unproven**. Not performed: a real REM 1.5.1 host with
+four concurrent sessions, real `notifications.raise` display, real event loss and reconciliation,
+Android BLE/Binder lifecycle on a device, binocular rendering of several slots, and the no-echo
+check for outbound display traffic. Remaining: Stage 4 documentation and hardware qualification.

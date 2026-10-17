@@ -6,7 +6,7 @@ Plan: `plan.md` in this directory. Status and evidence: `../../implementation-st
 |---|---|---|
 | 1. Host API migration to REM plugin API 1.3 | implemented, software-verified 2026-10-17 | `crates/atn-adapter/src/{rch.rs,config.rs,runtime.rs,runtime/*}`, `android/app/src/main/{AndroidManifest.xml,java/org/freetak/atn/AtnPluginService.java,java/org/freetak/atn/SettingsActivity.java,assets/rem-plugin-config/index.html}`, `docs/map-contract.md` |
 | 2. Automatic measurement capture | implemented, software-verified 2026-10-17 (synthetic tests, JNI smoke, Android build with a synthetic host fingerprint; no real REM host or hardware) | `crates/atn-adapter/src/{config.rs,runtime.rs,runtime/{control,observations,host}.rs}`, `crates/atn-adapter/tests/exchange.rs`, `android/app/src/main/java/org/freetak/atn/{AtnPluginService,SettingsActivity}.java`, `docs/map-contract.md` |
-| 3. Selected-point synchronization | single session in place: atomic slot allocation, rejection via `map.session.stop`, session-list recovery, observer refresh/hold | missing: up to 4 concurrent sessions with disjoint allocations, configured reconciliation interval, `notifications.raise` for rejection reasons |
+| 3. Selected-point synchronization | implemented, software-verified 2026-10-17 (synthetic tests, JNI smoke, Android build with a synthetic host fingerprint; no real REM host or hardware) | `crates/atn-adapter/src/{config.rs,runtime.rs,runtime/{sessions,control,host,observations}.rs}`, `crates/atn-domain/src/session.rs` (read-only accessors), `crates/atn-adapter/tests/exchange.rs`, `android/app/src/main/{AndroidManifest.xml,java/org/freetak/atn/AtnPluginService.java,java/org/freetak/atn/SettingsActivity.java}`, `docs/map-contract.md` |
 | 4. Bluetooth and goTenna compatibility | unchanged transport boundary | documentation note pending |
 | Hardware qualification | not performed | real REM 1.5.1 host, Binox, RNode BLE/Classic coexistence |
 
@@ -43,6 +43,28 @@ Decisions taken in Stage 2:
   persisted. This supersedes the Stage 1 "never retried" rule for unknown creations only.
 - Ending capture cancels unanswered observer snapshots of that capture but lets an already-sent
   `map.markers.create` record REM's answer.
+
+Decisions taken in Stage 3:
+
+- Concurrency composes one `atn-domain` `SyncSession` per REM session under a single scheduler in
+  `atn-adapter` (`runtime/sessions.rs`) instead of generalizing the domain type: each session keeps
+  its own queue, slot ownership, coalescing and reports, and the scheduler allows one transfer
+  (and one frame) device-wide, routes the next reply to that transfer's session and round-robins
+  between sessions with queued work. `SyncSession` only gained read-only accessors.
+- Operation IDs are per session, so echoes are matched on (connection, session, operation, frame)
+  against the single recorded in-flight frame. An echo for an ended session frees the device and
+  advances nothing. A single session ending emits `sessionEnded` rather than the global
+  `cancelWrites`, so its frame already on the radio completes instead of tearing down GATT for
+  the others.
+- A partial icon transfer cut off by any session end (or timeout, or a global end) closes GATT and
+  ends every session and allocation; reconnect plus new Share actions are required.
+- Reconciliation (`reconcileIntervalMs`) lists sessions on the tick; only sessions accepted before
+  the list request was sent can be judged absent. Transient list failures wait for the next
+  interval; transient `objects.get` failures end only that session.
+- `notifications.raise` (`{title, body}`, checked in REM `plugin_host_api.rs` and
+  `PluginCoordinator.java`) is sent once per rejected session and is fail-soft.
+- `setIcon`/`confirmDisplay` now require `sessionId`; refusing an unknown session/object answers
+  `accepted:false` without ending sessions (previously any refusal ended the single session).
 
 - The SDK AAR is built from the REM checkout into an external scratch directory; nothing is
   vendored and REM is not modified. Build inputs stay in environment variables.

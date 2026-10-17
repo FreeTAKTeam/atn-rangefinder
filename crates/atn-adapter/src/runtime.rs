@@ -4,8 +4,8 @@ mod observations;
 mod sessions;
 use crate::{AdapterConfig, RemMapObject};
 use atn_domain::{
-    MarkerStyle, ObservationRecord, ObserverFix, SelectedPle, SessionConfig, SyncSession,
-    derive_draft, marker_for_ple,
+    MarkerStyle, ObservationRecord, ObserverFix, SelectedPle, SessionConfig, SessionSnapshot,
+    SyncSession, derive_draft, marker_for_ple,
 };
 use atn_protocol::{DECODER_VERSION, InboundFrame, parse_inbound};
 use serde::Serialize;
@@ -25,6 +25,10 @@ pub const REQUIRED_API_MINOR: u64 = 3;
 pub const HOST_NAME_LIMIT: usize = 128;
 pub const HOST_NOTES_LIMIT: usize = 1024;
 const TERMINAL_SESSION_BOUND: usize = 64;
+/// REM serves at most four active selection sessions per plugin.
+pub const MAX_DISPLAY_SESSIONS: usize = 4;
+const RELEASED_SLOT_BOUND: usize = 32;
+const ENDED_SESSION_BOUND: usize = 8;
 
 pub const OP_SYMBOLS_LIST: &str = "map.symbols.list";
 pub const OP_MARKERS_CREATE: &str = "map.markers.create";
@@ -32,18 +36,23 @@ pub const OP_OBSERVER_SNAPSHOT: &str = "map.observer.snapshot";
 pub const OP_SESSION_LIST: &str = "map.session.list";
 pub const OP_SESSION_OBJECTS: &str = "map.session.objects.get";
 pub const OP_SESSION_STOP: &str = "map.session.stop";
+pub const OP_NOTIFY: &str = "notifications.raise";
 
 #[derive(Clone)]
 enum Purpose {
     Symbols,
-    /// Observer refresh for the active display session.
+    /// Observer refresh for the active display sessions.
     Observer,
     /// Observer snapshot captured for one retained observation.
     Measurement(u64),
     Create(u64),
-    SessionList,
+    /// Session discovery/reconciliation, with the time the request was sent:
+    /// only sessions accepted before then can be judged absent from the list.
+    SessionList(u64),
     SessionObjects(String),
     SessionStop(String),
+    /// Operator-visible rejection reason; best effort, never cancels work.
+    Notify,
 }
 struct Pending {
     purpose: Purpose,
@@ -125,8 +134,43 @@ struct Capture {
     started_at_ms: u64,
 }
 
-/// Owns one ephemeral connection and at most one REM-authorized display session
-/// per plugin process. No hardware identity, resume token, or write queue is persisted.
+/// One accepted REM selection session: its own domain queue and slots, and
+/// the host objects it was last given. Writes from all sessions share one
+/// device-wide scheduler in [`Adapter`].
+struct Display {
+    sync: SyncSession,
+    markers: BTreeMap<String, RemMapObject>,
+    last_encoded: BTreeMap<String, Vec<u8>>,
+    accepted_at_ms: u64,
+    /// Last authoritative object snapshot (`started` or `objects.get`).
+    snapshot_at_ms: u64,
+    /// An event arrived since the last authoritative snapshot.
+    dirty: bool,
+}
+
+/// A slot whose authorization ended. The device still shows whatever was
+/// last written there: releasing never sends a clear command.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReleasedSlot {
+    slot_id: u16,
+    session_id: String,
+    ple_id: String,
+    reason: String,
+    device_display_cleared: bool,
+}
+
+/// The one frame handed to the platform, device-wide.
+#[derive(Clone, PartialEq, Eq)]
+struct InFlight {
+    session_id: String,
+    operation_id: u64,
+    frame_number: usize,
+}
+
+/// Owns one ephemeral connection and up to four REM-authorized display
+/// sessions per plugin process. No hardware identity, resume token, or write
+/// queue is persisted.
 pub struct Adapter {
     config: Option<AdapterConfig>,
     host_started: bool,
@@ -137,10 +181,14 @@ pub struct Adapter {
     /// Connection-scoped; never persisted.
     colocation: Option<String>,
     observer: Option<ObserverFix>,
-    session: Option<SyncSession>,
+    displays: Vec<Display>,
+    ended_sessions: VecDeque<SessionSnapshot>,
+    released_slots: VecDeque<ReleasedSlot>,
+    in_flight: Option<InFlight>,
+    /// Round-robin cursor over `displays` for starting the next operation.
+    next_writer: usize,
+    last_reconcile_ms: Option<u64>,
     terminal_sessions: VecDeque<String>,
-    markers: BTreeMap<String, RemMapObject>,
-    last_encoded: BTreeMap<String, Vec<u8>>,
     observations: VecDeque<StoredObservation>,
     pending: BTreeMap<String, Pending>,
     sequence: u64,
@@ -170,10 +218,13 @@ impl Adapter {
             connection: None,
             colocation: None,
             observer: None,
-            session: None,
+            displays: Vec::new(),
+            ended_sessions: VecDeque::new(),
+            released_slots: VecDeque::new(),
+            in_flight: None,
+            next_writer: 0,
+            last_reconcile_ms: None,
             terminal_sessions: VecDeque::new(),
-            markers: BTreeMap::new(),
-            last_encoded: BTreeMap::new(),
             observations: VecDeque::new(),
             pending: BTreeMap::new(),
             sequence: 0,
@@ -212,10 +263,9 @@ impl Adapter {
                 let mut actions = vec![json!({"kind":"cancelWrites"})];
                 self.drop_observation_requests("adapter error before host answered");
                 self.pending.clear();
-                self.cancel_session(&message);
-                if let Some(now) = now {
-                    self.end_session_on_host(now, &mut actions);
-                }
+                // REM is told once per session when a clock is known.
+                let tell_host = now.is_some();
+                self.end_all_displays(&message, tell_host, now.unwrap_or_default(), &mut actions);
                 self.enforce_capture_gate(&mut actions);
                 self.cancel_host_actions(&mut actions);
                 json!({"ok":false,"error":{"code":"adapter","message":message},"actions":actions})
@@ -300,25 +350,6 @@ impl Adapter {
         actions.push(json!({"kind":"cancelHostRequests","keepRequestIds":self.pending.keys().collect::<Vec<_>>()}));
     }
 
-    /// Ends the local display session; REM is told separately by
-    /// [`Self::end_session_on_host`] because that needs a live host request.
-    fn cancel_session(&mut self, reason: &str) {
-        if let Some(session) = self.session.as_mut() {
-            if matches!(session.snapshot().state, atn_domain::SessionState::Active) {
-                session.stop(reason.into());
-            }
-        }
-        self.markers.clear();
-        self.last_encoded.clear();
-    }
-
-    fn active_session_id(&self) -> Option<String> {
-        self.session
-            .as_ref()
-            .filter(|s| matches!(s.snapshot().state, atn_domain::SessionState::Active))
-            .map(|s| s.snapshot().session_id)
-    }
-
     fn write_gate(&self, now: u64) -> Result<(), String> {
         if !self.host_ready {
             return Err("REM map API unavailable; adapter remains read-only".into());
@@ -360,33 +391,6 @@ impl Adapter {
         )
     }
 
-    fn pump(&mut self, now: u64, actions: &mut Vec<Value>) -> Result<(), String> {
-        if self.active_session_id().is_none() {
-            return Ok(());
-        }
-        self.write_gate(now)?;
-        if let Err(reason) = self.observer_valid(now) {
-            // Hold rather than send relative geometry from an ineligible fix.
-            actions.push(
-                json!({"kind":"status","message":format!("holding display writes: {reason}")}),
-            );
-            return self.refresh_observer(now, actions);
-        }
-        if let Some(frame) = self
-            .session
-            .as_mut()
-            .ok_or("session required")?
-            .next_write(now)
-            .map_err(|e| e.to_string())?
-        {
-            actions.push(json!({"kind":"write","operationId":frame.operation_id,
-                "frameNumber":frame.frame_number,"totalFrames":frame.total_frames,"bytes":frame.bytes,
-                "sessionId":self.session.as_ref().map(|s|s.snapshot().session_id),
-                "connectionId":self.connection.as_ref().map(|(id,_)|id)}));
-        }
-        Ok(())
-    }
-
     /// Next per-process capture nonce: `c<process>-<count>`, at most 38
     /// ASCII-graphic characters.
     fn mint_capture_nonce(&mut self) -> Result<String, String> {
@@ -406,7 +410,12 @@ impl Adapter {
             "hostReady":self.host_ready,"colocationConfirmed":self.colocation.is_some(),
             "capture":{"active":self.capture.is_some(),"session":self.capture,"lastEnded":self.capture_ended},
             "observerFresh":self.observer.is_some(),
-            "session":self.session.as_ref().map(SyncSession::snapshot),
+            "maxSessions":MAX_DISPLAY_SESSIONS,"freeSlots":self.free_slots(),
+            "sessions":self.displays.iter().map(|d| d.sync.snapshot()).collect::<Vec<_>>(),
+            "endedSessions":self.ended_sessions,"releasedSlots":self.released_slots,
+            "terminalSessions":self.terminal_sessions,
+            "inFlight":self.in_flight.as_ref().map(|f| json!({"sessionId":f.session_id,
+                "operationId":f.operation_id,"frameNumber":f.frame_number})),
             "pendingHostRequests":self.pending.len(),"observations":self.observations})
     }
 }

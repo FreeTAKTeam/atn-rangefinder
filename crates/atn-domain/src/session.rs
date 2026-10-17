@@ -494,6 +494,35 @@ impl SyncSession {
         self.stop("device disconnected; new authorization required".to_owned());
     }
 
+    /// The transfer that currently owns this session's write slot, if any. A
+    /// scheduler serving several sessions over one device uses this to keep a
+    /// single transfer (and its reply) outstanding device-wide.
+    #[must_use]
+    pub fn active_transfer(&self) -> Option<&TransferReport> {
+        self.active.as_ref().map(|active| &active.operation.report)
+    }
+
+    #[must_use]
+    pub fn queued_operations(&self) -> usize {
+        self.queue.len()
+    }
+
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        matches!(self.state, SessionState::Active)
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.config.session_id
+    }
+
+    /// Slot owned by a selected PLE.
+    #[must_use]
+    pub fn slot_of(&self, ple_id: &str) -> Option<u16> {
+        self.selected.get(ple_id).copied()
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> SessionSnapshot {
         SessionSnapshot {

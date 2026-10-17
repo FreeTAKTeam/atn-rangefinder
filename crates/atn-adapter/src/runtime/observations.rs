@@ -79,23 +79,7 @@ impl Adapter {
                 }
                 Ok(json!({"id":id,"observation":record,"host":host}))
             }
-            InboundFrame::Reply(reply) => {
-                let Some(session) = self.session.as_mut() else {
-                    return Ok(json!({"reply":reply,"associated":false}));
-                };
-                match session.observe_reply(reply.clone(), now) {
-                    Ok(report) => {
-                        self.pump(now, actions)?;
-                        Ok(json!({"report":report}))
-                    }
-                    Err(
-                        atn_domain::DomainError::UnexpectedReply
-                        | atn_domain::DomainError::TransportPending
-                        | atn_domain::DomainError::SessionStopped,
-                    ) => Ok(json!({"reply":reply,"associated":false})),
-                    Err(error) => Err(error.to_string()),
-                }
-            }
+            InboundFrame::Reply(reply) => self.route_reply(reply, now, actions),
             InboundFrame::Unknown(frame) => Ok(json!({"diagnostic":frame})),
         }
     }

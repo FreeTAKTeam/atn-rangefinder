@@ -809,3 +809,25 @@ fn selected_removal_cancels_its_updates_and_never_clears_device_markers() {
         SessionState::Stopped { .. }
     ));
 }
+
+#[test]
+fn scheduler_accessors_expose_the_single_active_transfer() {
+    let mut session = SyncSession::start(config(), NOW).unwrap();
+    assert!(session.is_active());
+    assert_eq!(session.session_id(), config().session_id);
+    assert_eq!(session.slot_of("selected"), Some(3));
+    assert_eq!(session.slot_of("unselected"), None);
+    assert!(session.active_transfer().is_none());
+    session
+        .enqueue_position("selected", &marker(3), NOW)
+        .unwrap();
+    assert_eq!(session.queued_operations(), 1);
+    let frame = session.next_write(NOW).unwrap().unwrap();
+    assert_eq!(session.queued_operations(), 0);
+    let active = session.active_transfer().unwrap();
+    assert_eq!(active.operation_id, frame.operation_id);
+    assert!(!active.transport_complete);
+    session.stop("synthetic".to_owned());
+    assert!(!session.is_active());
+    assert!(session.active_transfer().is_none());
+}

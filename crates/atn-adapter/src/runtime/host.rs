@@ -1,7 +1,4 @@
-use super::{
-    Adapter, HostOutcome, OP_SESSION_LIST, ObserverFix, Purpose, RemMapObject, Value, decode, json,
-    text,
-};
+use super::{Adapter, HostOutcome, ObserverFix, Purpose, RemMapObject, Value, decode, json, text};
 use atn_domain::{GeographicPosition, ObserverSource};
 
 impl Adapter {
@@ -75,18 +72,12 @@ impl Adapter {
                 }
                 self.confirmed_symbol = Some(wanted.to_owned());
                 self.host_ready = true;
-                self.request(
-                    Purpose::SessionList,
-                    OP_SESSION_LIST,
-                    json!({}),
-                    now,
-                    actions,
-                )?;
+                self.request_session_list(now, actions)?;
             }
             Purpose::Observer => match self.observer_from_snapshot(result) {
                 Ok(fix) => {
                     self.accept_observer(fix, now)?;
-                    self.refresh_selected(now, actions)?;
+                    self.refresh_selected(None, now, actions)?;
                 }
                 Err(reason) => {
                     actions.push(json!({"kind":"status","message":format!("observer fix ineligible: {reason}")}));
@@ -133,15 +124,13 @@ impl Adapter {
                     },
                 );
             }
-            Purpose::SessionList => {
+            Purpose::SessionList(sent_at_ms) => {
                 let items = result
                     .get("items")
                     .and_then(Value::as_array)
                     .cloned()
                     .ok_or("session list items required")?;
-                for session in &items {
-                    self.consider_session(session, None, now, actions)?;
-                }
+                self.session_list_result(&items, sent_at_ms, now, actions)?;
             }
             Purpose::SessionObjects(expected) => {
                 let session = result.get("session").ok_or("session required")?;
@@ -151,7 +140,7 @@ impl Adapter {
                 let objects: Vec<RemMapObject> = decode(result, "objects")?;
                 self.apply_objects(&expected, objects, now, actions)?;
             }
-            Purpose::SessionStop(_) => {}
+            Purpose::SessionStop(_) | Purpose::Notify => {}
         }
         Ok(())
     }
@@ -198,8 +187,28 @@ impl Adapter {
                 }
             }
             Purpose::SessionStop(_) => return Ok(self.status()),
+            // Notifications are best effort, even when REM denies the capability.
+            Purpose::Notify => {
+                actions.push(json!({"kind":"status","message":format!("REM notification not shown: {code} {message}")}));
+                return Ok(self.status());
+            }
             Purpose::SessionObjects(id) if code == "NotFound" => {
-                self.session_stopped(&id, "unknown to REM", actions);
+                self.session_stopped(&id, "unknown to REM", now, actions);
+                return Ok(self.status());
+            }
+            Purpose::SessionObjects(id) if transient => {
+                self.end_display(
+                    &id,
+                    &format!("REM session objects failed: {code}"),
+                    true,
+                    false,
+                    now,
+                    actions,
+                );
+                return Ok(self.status());
+            }
+            Purpose::SessionList(_) if transient => {
+                actions.push(json!({"kind":"status","message":format!("REM session list failed: {code} {message}")}));
                 return Ok(self.status());
             }
             Purpose::Observer if transient => {
@@ -236,17 +245,19 @@ impl Adapter {
                 self.consider_session(payload, Some(objects), now, actions)?;
             }
             "map.session.object.updated" => {
-                if !self.event_session_matches(payload) {
+                let session = text(payload, "sessionId")?.to_owned();
+                if !self.mark_dirty(&session) {
                     return Ok(json!({"ignored":"different session"}));
                 }
-                self.update_marker(decode(payload, "object")?, now, actions)?;
+                self.update_marker(&session, decode(payload, "object")?, now, actions)?;
             }
             "map.session.object.removed" => {
-                if !self.event_session_matches(payload) {
+                let session = text(payload, "sessionId")?.to_owned();
+                if !self.mark_dirty(&session) {
                     return Ok(json!({"ignored":"different session"}));
                 }
                 let id = text(payload, "objectDestinationHash")?.to_owned();
-                self.remove_object(&id, actions)?;
+                self.remove_object(&session, &id, now, actions)?;
             }
             "map.session.stopped" => {
                 let id = text(payload, "sessionId")?.to_owned();
@@ -254,7 +265,7 @@ impl Adapter {
                     .get("reason")
                     .and_then(Value::as_str)
                     .unwrap_or("unspecified");
-                self.session_stopped(&id, reason, actions);
+                self.session_stopped(&id, reason, now, actions);
             }
             _ => return Ok(json!({"ignored":"unrelated event"})),
         }
@@ -320,11 +331,5 @@ impl Adapter {
         }
         self.observer = Some(fix);
         Ok(true)
-    }
-
-    fn event_session_matches(&self, payload: &Value) -> bool {
-        self.active_session_id().is_some_and(|active| {
-            payload.get("sessionId").and_then(Value::as_str) == Some(active.as_str())
-        })
     }
 }
