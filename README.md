@@ -23,6 +23,7 @@ The adapter targets REM's implemented plugin map API 1.3 (REM 1.5.1, commit `911
 - [`atn-adapter`](crates/atn-adapter): bounded REM map API 1.3 requests, REM/RCH map object decoding, idempotent marker creation, session slot allocation and JNI actions.
 - [Android plugin](android/README.md): trusted Binder service, permissions/settings activity, BLE notifications and serialized display writes.
 - [Map contract](docs/map-contract.md), [configuration](docs/configuration.md), and [synthetic configuration template](examples/synthetic-config.json).
+- [Radio coexistence](docs/radio-coexistence.md) with REM's RNode link, the [hardware qualification checklist](docs/goals/atn-rem-plugin/qualification.md) (not yet performed), and the [goTenna plugin architecture note](docs/goals/gotenna-plugin/architecture.md).
 
 Build and validate the Rust workspace with:
 

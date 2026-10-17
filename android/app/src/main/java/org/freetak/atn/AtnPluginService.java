@@ -49,7 +49,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
     private boolean foreground;
     private long nativeTickBoundMs;
     private final Runnable writeTimeout = () -> {
-        cancelWrites();
+        cancelWrites("timeout");
         ble.close("Write timed out; reconnect explicitly");
     };
     private final Runnable tick = new Runnable() {
@@ -163,13 +163,13 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
     void disconnectFromUi() {
         authorizedSessions.clear();
         call(command("stopSync"));
-        cancelWrites();
+        cancelWrites("cancelled");
         ble.close("Disconnected by operator");
         stopForeground();
     }
     JSONObject configureFromUi(JSONObject config) {
         authorizedSessions.clear();
-        cancelWrites();
+        cancelWrites("cancelled");
         try { transport = preferences.transport(); }
         catch (JSONException error) { status = "Save valid transport policy before map configuration"; return new JSONObject(); }
         JSONObject response = call(command("configure", "config", config));
@@ -211,7 +211,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
     }
     void clearColocationFromUi() {
         authorizedSessions.clear();
-                cancelWrites();
+                cancelWrites("cancelled");
         call(command("clearColocation"));
         status = "Co-location confirmation withdrawn. Read-only observation remains active";
     }
@@ -219,7 +219,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
     void stopSyncFromUi(String sessionId) {
         if (sessionId.isEmpty()) {
             authorizedSessions.clear();
-            cancelWrites();
+            cancelWrites("cancelled");
             call(command("stopSync"));
             status = "All display sessions stopped. Read-only observation remains active";
         } else {
@@ -259,7 +259,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
         deathRecipient = null;
         call(command("hostStopped"));
         requests.cancel(reason);
-        cancelWrites();
+        cancelWrites("cancelled");
         ble.close("REM host session ended");
         stopForeground();
         status = "REM host session ended; reconnect explicitly";
@@ -365,14 +365,14 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
                 String connection = action.getString("connectionId");
                 SerialWriteQueue.Write write = new SerialWriteQueue.Write(id, frame, session, connection, bytes(action.getJSONArray("bytes")));
                 if (!authorizedSessions.contains(session) || writes == null || !ble.ready() || !connectionId.equals(connection)) {
-                    transportResult(write, false); return;
+                    transportResult(write, false, "notAuthorized", -1); return;
                 }
                 try {
                     writes.add(write, ble.capacity());
                     pumpWrite();
                 } catch (IllegalArgumentException | IllegalStateException error) {
-                    transportResult(write, false);
-                    cancelWrites();
+                    transportResult(write, false, "queueRejected", -1);
+                    cancelWrites("cancelled");
                     ble.close("Write queue rejected an operation");
                 }
                 break;
@@ -406,35 +406,45 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
         if (writes == null || writes.active() != null) return;
         SerialWriteQueue.Write active = writes.begin();
         if (active == null) return;
-        if (!ble.write(active.bytes)) { writeCompleted(false); return; }
+        if (!ble.write(active.bytes)) { completeWrite(false, "writeRejected", -1); return; }
         handler.postDelayed(writeTimeout, transport.writeTimeoutMs);
     }
-    @Override public void writeCompleted(boolean success) {
+    @Override public void writeCompleted(boolean success, int gattStatus) {
+        completeWrite(success, "gattStatus", gattStatus);
+    }
+    private void completeWrite(boolean success, String errorCode, int gattStatus) {
         handler.removeCallbacks(writeTimeout);
         SerialWriteQueue.Write active = writes == null ? null : writes.complete();
         if (active == null) return;
-        transportResult(active, success);
-        if (!success) { cancelWrites(); ble.close("Transport failure; reconnect explicitly"); }
+        transportResult(active, success, errorCode, gattStatus);
+        if (!success) { cancelWrites("cancelled"); ble.close("Transport failure; reconnect explicitly"); }
         else pumpWrite();
     }
-    private void transportResult(SerialWriteQueue.Write write, boolean completed) {
+    /** Echoes the write's identity, the write characteristic and, on failure, a typed error. */
+    private void transportResult(SerialWriteQueue.Write write, boolean completed, String errorCode, int gattStatus) {
         long numericId;
         try { numericId = Long.parseLong(write.operationId); }
         catch (NumberFormatException error) { status = "Invalid native operation ID"; return; }
         JSONObject result = command("transportResult", "operationId", numericId);
         try {
             result.put("frameNumber", write.frameNumber).put("completed", completed)
-                .put("sessionId", write.sessionId).put("connectionId", write.connectionId);
+                .put("sessionId", write.sessionId).put("connectionId", write.connectionId)
+                .put("characteristic", BleTransport.SEND.toString());
+            if (!completed) {
+                JSONObject error = new JSONObject().put("code", errorCode);
+                if (gattStatus >= 0) error.put("gattStatus", gattStatus);
+                result.put("error", error);
+            }
         } catch (JSONException ignored) { }
         call(result);
     }
-    private void cancelWrites() {
+    private void cancelWrites(String code) {
         handler.removeCallbacks(writeTimeout);
         if (writes == null) return;
         boolean inFlight = writes.active() != null;
         java.util.List<SerialWriteQueue.Write> cancelled = writes.cancel();
         if (inFlight) ble.close("In-flight write cancelled; reconnect explicitly");
-        for (SerialWriteQueue.Write write : cancelled) transportResult(write, false);
+        for (SerialWriteQueue.Write write : cancelled) transportResult(write, false, code, -1);
     }
     private void discardWrites() {
         handler.removeCallbacks(writeTimeout);
@@ -447,20 +457,27 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
     }
     @Override public void ready(int capacity) {
         JSONObject request = command("connected", "writeCapacity", capacity);
-        try { request.put("connectionId", connectionId); } catch (JSONException ignored) { }
+        try {
+            request.put("connectionId", connectionId).put("serviceUuid", BleTransport.SERVICE.toString())
+                .put("notifyCharacteristic", BleTransport.RECEIVE.toString())
+                .put("writeCharacteristic", BleTransport.SEND.toString());
+        } catch (JSONException ignored) { }
         call(request);
         status = "Read-only notifications active; ATT write capacity " + capacity;
     }
-    @Override public void notification(byte[] bytes, long timestampMs) {
+    @Override public void notification(byte[] bytes, long timestampMs, java.util.UUID characteristic) {
         JSONObject request = command("notification", "bytes", unsigned(bytes));
-        try { request.put("observedAtMs", timestampMs).put("sessionSource", connectionId); } catch (JSONException ignored) { }
+        try {
+            request.put("observedAtMs", timestampMs).put("sessionSource", connectionId)
+                .put("characteristic", characteristic.toString());
+        } catch (JSONException ignored) { }
         call(request);
     }
     @Override public void disconnected(String reason) {
         authorizedSessions.clear();
         captureActive = false;
         call(command("disconnected", "reason", reason));
-        cancelWrites();
+        cancelWrites("cancelled");
         stopForeground();
         status = reason;
     }

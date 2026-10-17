@@ -1,7 +1,8 @@
 use super::{
     Adapter, BTreeMap, CreateAttempt, DECODER_VERSION, HOST_NAME_LIMIT, HOST_NOTES_LIMIT,
-    HostOutcome, InboundFrame, OP_MARKERS_CREATE, OP_OBSERVER_SNAPSHOT, ObservationRecord, Purpose,
-    Resolution, StoredObservation, Value, decode, derive_draft, integer, json, parse_inbound,
+    HostOutcome, InboundFrame, NOTIFICATION_UUID, OP_MARKERS_CREATE, OP_OBSERVER_SNAPSHOT,
+    ObservationRecord, Purpose, Resolution, StoredObservation, Value, decode, derive_draft,
+    gatt_uuid, integer, json, parse_inbound,
 };
 use atn_domain::{BearingReference, DerivedDraft};
 
@@ -17,6 +18,11 @@ impl Adapter {
             .connection
             .as_ref()
             .ok_or("notification from disconnected transport")?;
+        // Measurements and replies are decoded only from the ATN notification
+        // characteristic, never from write completions or other channels.
+        if !gatt_uuid(v, "characteristic", NOTIFICATION_UUID) {
+            return Ok(json!({"ignored":"not the ATN notification characteristic"}));
+        }
         match parse_inbound(&bytes).map_err(|e| e.to_string())? {
             InboundFrame::Measurement(raw) => {
                 let c = self

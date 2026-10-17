@@ -27,8 +27,10 @@ final class BleTransport {
     private static final UUID CCCD = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
     interface Listener {
         void ready(int capacity);
-        void notification(byte[] bytes, long timestampMs);
-        void writeCompleted(boolean success);
+        /** Only ever called for the subscribed ATN notification characteristic. */
+        void notification(byte[] bytes, long timestampMs, UUID characteristic);
+        /** {@code gattStatus} is the platform's GATT status code for this write. */
+        void writeCompleted(boolean success, int gattStatus);
         void disconnected(String reason);
     }
     private final Context context;
@@ -156,7 +158,7 @@ final class BleTransport {
         }
         @Override public void onCharacteristicWrite(BluetoothGatt value, BluetoothGattCharacteristic characteristic, int status) {
             handler.post(() -> {
-                if (value == gatt && SEND.equals(characteristic.getUuid())) listener.writeCompleted(status == BluetoothGatt.GATT_SUCCESS);
+                if (value == gatt && SEND.equals(characteristic.getUuid())) listener.writeCompleted(status == BluetoothGatt.GATT_SUCCESS, status);
             });
         }
     };
@@ -164,6 +166,6 @@ final class BleTransport {
         if (!RECEIVE.equals(characteristic.getUuid()) || bytes == null) return;
         byte[] owned = bytes.clone();
         long timestamp = System.currentTimeMillis();
-        handler.post(() -> { if (value == gatt && subscribed) listener.notification(owned, timestamp); });
+        handler.post(() -> { if (value == gatt && subscribed) listener.notification(owned, timestamp, RECEIVE); });
     }
 }

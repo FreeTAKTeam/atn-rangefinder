@@ -4,9 +4,29 @@
 use atn_adapter::Adapter;
 use serde_json::{Value, json};
 
+const SERVICE: &str = "d973f2e0-b19e-11e2-9e96-0800200c9a66";
+const NOTIFY: &str = "d973f2e1-b19e-11e2-9e96-0800200c9a66";
+const WRITE: &str = "d973f2e2-b19e-11e2-9e96-0800200c9a66";
+/// Dispatches `v`, filling in the platform's GATT identity when a test does
+/// not state it, as Android always does.
 fn call(a: &mut Adapter, mut v: Value) -> Value {
     if v.get("nowMs").is_none() {
         v["nowMs"] = json!(10000);
+    }
+    let defaults: &[(&str, &str)] = match v["cmd"].as_str() {
+        Some("connected") => &[
+            ("serviceUuid", SERVICE),
+            ("notifyCharacteristic", NOTIFY),
+            ("writeCharacteristic", WRITE),
+        ],
+        Some("notification") => &[("characteristic", NOTIFY)],
+        Some("transportResult") => &[("characteristic", WRITE)],
+        _ => &[],
+    };
+    for (key, uuid) in defaults {
+        if v.get(*key).is_none() {
+            v[*key] = json!(uuid);
+        }
     }
     serde_json::from_str(&a.dispatch(&v.to_string())).expect("JSON response")
 }
@@ -1806,4 +1826,77 @@ fn partial_icon_timing_out_closes_the_transport() {
     let v = call(&mut a, json!({"cmd":"tick","nowMs":13000}));
     assert_eq!(v["ok"], true, "{v}");
     assert_invalidated(&mut a, &v, &frame);
+}
+
+#[test]
+fn connection_requires_the_atn_gatt_identity() {
+    let mut a = Adapter::new();
+    call(&mut a, json!({"cmd":"configure","config":config()}));
+    // Without characteristic identity the platform boundary is refused.
+    let v: Value = serde_json::from_str(
+        &a.dispatch(
+            &json!({"cmd":"connected","nowMs":10000,"connectionId":"c","writeCapacity":509})
+                .to_string(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(v["ok"], false);
+    let v = call(
+        &mut a,
+        json!({"cmd":"connected","connectionId":"c","writeCapacity":509,"writeCharacteristic":NOTIFY}),
+    );
+    assert_eq!(v["ok"], false);
+    assert_eq!(
+        call(&mut a, json!({"cmd":"status"}))["result"]["connected"],
+        false
+    );
+    let v = call(
+        &mut a,
+        json!({"cmd":"connected","connectionId":"c","writeCapacity":509,"serviceUuid":SERVICE.to_uppercase()}),
+    );
+    assert_eq!(v["ok"], true, "{v}");
+}
+
+#[test]
+fn measurements_decode_only_from_the_notification_characteristic() {
+    let mut a = capturing();
+    let v = call(
+        &mut a,
+        json!({"cmd":"notification","bytes":[1,1,0,120,0,0,0,90],"observedAtMs":10000,"characteristic":WRITE}),
+    );
+    assert_eq!(v["ok"], true);
+    assert_eq!(
+        v["result"]["ignored"],
+        "not the ATN notification characteristic"
+    );
+    assert!(!has_action(&v, "hostRequest"));
+    let status = call(&mut a, json!({"cmd":"status"}));
+    assert_eq!(status["result"]["observations"], json!([]));
+    let v = observe(&mut a);
+    assert_eq!(v["result"]["host"]["state"], "observerRequested");
+}
+
+#[test]
+fn transport_echo_must_name_the_write_characteristic_and_failures_are_typed() {
+    let mut a = connected();
+    ready(&mut a);
+    let v = sync(&mut a);
+    let w = write(&v);
+    let v = call(
+        &mut a,
+        json!({"cmd":"transportResult","connectionId":w["connectionId"],"sessionId":w["sessionId"],"operationId":w["operationId"],"frameNumber":1,"completed":true,"characteristic":NOTIFY}),
+    );
+    assert_eq!(v["result"]["ignored"], "stale transport callback");
+    let v = call(
+        &mut a,
+        json!({"cmd":"transportResult","connectionId":w["connectionId"],"sessionId":w["sessionId"],"operationId":w["operationId"],"frameNumber":1,"completed":false,"error":{"code":"gattStatus","gattStatus":133}}),
+    );
+    assert_eq!(v["ok"], false);
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("gattStatus")
+    );
+    assert!(has_action(&v, "cancelWrites"));
 }

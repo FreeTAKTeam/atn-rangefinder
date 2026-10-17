@@ -7,7 +7,9 @@ use atn_domain::{
     MarkerStyle, ObservationRecord, ObserverFix, SelectedPle, SessionConfig, SessionSnapshot,
     SyncSession, derive_draft, marker_for_ple,
 };
-use atn_protocol::{DECODER_VERSION, InboundFrame, parse_inbound};
+use atn_protocol::{
+    DECODER_VERSION, InboundFrame, NOTIFICATION_UUID, SERVICE_UUID, WRITE_UUID, parse_inbound,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
@@ -434,6 +436,12 @@ fn integer(v: &Value, key: &str) -> Result<u64, String> {
     v.get(key)
         .and_then(Value::as_u64)
         .ok_or_else(|| format!("unsigned {key} required"))
+}
+/// Whether the platform reported exactly this GATT UUID (case-insensitive).
+fn gatt_uuid(v: &Value, key: &str, expected: &str) -> bool {
+    v.get(key)
+        .and_then(Value::as_str)
+        .is_some_and(|uuid| uuid.eq_ignore_ascii_case(expected))
 }
 fn clock_ms() -> Result<u64, String> {
     let elapsed = SystemTime::now()

@@ -166,10 +166,15 @@ Removing an object or stopping a session releases its slot without a device clea
 `{cmd, nowMs, ...}`; Binder envelopes remain capped at 65,536 bytes. It returns
 `{ok, result?, error?, actions}`. Android supplies the time, runs calls on one handler, and owns
 real GATT/Binder completion. Native commands: configure, hostStarted (`apiMinor` from the start
-session JSON), hostStopped, connected/disconnected, confirmColocation/clearColocation,
-startCapture/stopCapture, notification, hostResponse/hostEvent, stopSync (optional `sessionId`;
+session JSON), hostStopped, connected (`connectionId`, `writeCapacity`, `serviceUuid`,
+`notifyCharacteristic`, `writeCharacteristic`; any identity other than the ATN service and its two
+characteristics is refused), disconnected, confirmColocation/clearColocation,
+startCapture/stopCapture, notification (`bytes`, `observedAtMs`, `characteristic`: only the ATN
+notification characteristic is decoded), hostResponse/hostEvent, stopSync (optional `sessionId`;
 without it every session stops), setStyle (all sessions), setIcon (`sessionId`, `pleId`, `png`),
-transportResult, confirmDisplay (`sessionId`, `operationId`, `evidenceId`), tick, status.
+transportResult (`connectionId`, `sessionId`, `operationId`, `frameNumber`, `completed`,
+`characteristic` = the ATN write characteristic, and on failure a typed `error {code,
+gattStatus?}`), confirmDisplay (`sessionId`, `operationId`, `evidenceId`), tick, status.
 `setIcon` and `confirmDisplay` for an unknown session or object answer `{accepted:false, reason}`
 without ending any session.
 

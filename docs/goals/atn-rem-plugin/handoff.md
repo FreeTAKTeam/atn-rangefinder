@@ -7,8 +7,8 @@ Plan: `plan.md` in this directory. Status and evidence: `../../implementation-st
 | 1. Host API migration to REM plugin API 1.3 | implemented, software-verified 2026-10-17 | `crates/atn-adapter/src/{rch.rs,config.rs,runtime.rs,runtime/*}`, `android/app/src/main/{AndroidManifest.xml,java/org/freetak/atn/AtnPluginService.java,java/org/freetak/atn/SettingsActivity.java,assets/rem-plugin-config/index.html}`, `docs/map-contract.md` |
 | 2. Automatic measurement capture | implemented, software-verified 2026-10-17 (synthetic tests, JNI smoke, Android build with a synthetic host fingerprint; no real REM host or hardware) | `crates/atn-adapter/src/{config.rs,runtime.rs,runtime/{control,observations,host}.rs}`, `crates/atn-adapter/tests/exchange.rs`, `android/app/src/main/java/org/freetak/atn/{AtnPluginService,SettingsActivity}.java`, `docs/map-contract.md` |
 | 3. Selected-point synchronization | implemented, software-verified 2026-10-17 (synthetic tests, JNI smoke, Android build with a synthetic host fingerprint; no real REM host or hardware) | `crates/atn-adapter/src/{config.rs,runtime.rs,runtime/{sessions,control,host,observations}.rs}`, `crates/atn-domain/src/session.rs` (read-only accessors), `crates/atn-adapter/tests/exchange.rs`, `android/app/src/main/{AndroidManifest.xml,java/org/freetak/atn/AtnPluginService.java,java/org/freetak/atn/SettingsActivity.java}`, `docs/map-contract.md` |
-| 4. Bluetooth and goTenna compatibility | unchanged transport boundary | documentation note pending |
-| Hardware qualification | not performed | real REM 1.5.1 host, Binox, RNode BLE/Classic coexistence |
+| 4. Bluetooth and goTenna compatibility | implemented and documented 2026-10-17 (code review, synthetic tests, JNI smoke, Android build; no hardware) | `docs/radio-coexistence.md`, `docs/goals/gotenna-plugin/architecture.md`, `android/app/src/main/java/org/freetak/atn/{BleTransport,AtnPluginService}.java`, `crates/atn-adapter/src/runtime/{control,observations,sessions}.rs` |
+| Hardware qualification | not performed (deferred by the user) | checklist: `qualification.md` in this directory |
 
 Decisions taken in Stage 1:
 
@@ -65,6 +65,22 @@ Decisions taken in Stage 3:
   `PluginCoordinator.java`) is sent once per rejected session and is fail-soft.
 - `setIcon`/`confirmDisplay` now require `sessionId`; refusing an unknown session/object answers
   `accepted:false` without ending sessions (previously any refusal ended the single session).
+
+Decisions taken in Stage 4:
+
+- Coexistence review found no adapter toggling, bonding, unrelated-device disconnects or
+  unbounded/implicit discovery; per-file evidence is in `docs/radio-coexistence.md`. No behaviour
+  change was needed there.
+- The native boundary now carries GATT identity: `connected` must report the ATN service and its
+  notification/write characteristics (otherwise refused), `notification` names its characteristic
+  (only the notification characteristic is decoded) and `transportResult` names the write
+  characteristic and a typed `error {code, gattStatus?}`. The connection ID remains the connection
+  generation.
+- RNode/goTenna switching is documented as operator-managed with no software interlock.
+- The goTenna plugin is a separate APK/Binder service with its own Rust core; no shared transport
+  library and no Linux console port. The alignment note it builds on
+  (`docs/plugin-architecture-alignment.md`) is local and uncommitted, so the architecture note
+  restates the parts it relies on.
 
 - The SDK AAR is built from the REM checkout into an external scratch directory; nothing is
   vendored and REM is not modified. Build inputs stay in environment variables.

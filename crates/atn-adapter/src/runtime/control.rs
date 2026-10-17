@@ -1,6 +1,7 @@
 use super::{
-    Adapter, AdapterConfig, Capture, HostOutcome, OP_SYMBOLS_LIST, Purpose, REQUIRED_API_MINOR,
-    Resolution, Value, decode, integer, json, text,
+    Adapter, AdapterConfig, Capture, HostOutcome, NOTIFICATION_UUID, OP_SYMBOLS_LIST, Purpose,
+    REQUIRED_API_MINOR, Resolution, SERVICE_UUID, Value, WRITE_UUID, decode, gatt_uuid, integer,
+    json, text,
 };
 
 impl Adapter {
@@ -245,6 +246,16 @@ impl Adapter {
                 let capacity = usize::try_from(capacity).map_err(|e| e.to_string())?;
                 if !(20..=512).contains(&capacity) {
                     return Err("invalid negotiated ATT capacity".into());
+                }
+                // The platform must have bound exactly the ATN service and its
+                // notification and write characteristics on this connection.
+                if !(gatt_uuid(v, "serviceUuid", SERVICE_UUID)
+                    && gatt_uuid(v, "notifyCharacteristic", NOTIFICATION_UUID)
+                    && gatt_uuid(v, "writeCharacteristic", WRITE_UUID))
+                {
+                    return Err(
+                        "connection lacks the ATN service and characteristic identity".into(),
+                    );
                 }
                 self.connection = Some((text(v, "connectionId")?.into(), capacity));
                 actions.push(json!({"kind":"cancelWrites"}));

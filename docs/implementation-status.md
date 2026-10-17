@@ -189,3 +189,37 @@ Status after Stage 3: **implemented but unproven**. Not performed: a real REM 1.
 four concurrent sessions, real `notifications.raise` display, real event loss and reconciliation,
 Android BLE/Binder lifecycle on a device, binocular rendering of several slots, and the no-echo
 check for outbound display traffic. Remaining: Stage 4 documentation and hardware qualification.
+
+## Bluetooth coexistence and goTenna compatibility (2026-10-17, Stage 4 of `docs/goals/atn-rem-plugin/plan.md`)
+
+- Coexistence code review of `BleTransport.java`, `SettingsActivity.java`, `AtnPluginService.java`
+  and the manifest: the plugin never enables/disables the adapter, never bonds or disconnects
+  unrelated devices, keeps one GATT object for the operator-selected device, and scans only on the
+  operator's request, ATN-service-filtered unless **scan all** is ticked, bounded by
+  `scanTimeoutMs` and the device-list bound. Per-file evidence is in `docs/radio-coexistence.md`.
+- Transport boundary: `connected` now carries the bound service, notification and write
+  characteristic UUIDs (Rust refuses anything else); `notification` names its characteristic
+  (Rust decodes measurements and replies only from the notification characteristic);
+  `transportResult` names the write characteristic and reports a typed `error {code, gattStatus?}`
+  on failure. `BleTransport.Listener` passes the characteristic and GATT status through.
+  `NativeSmoke.java` sends the new fields.
+- Documentation: `docs/radio-coexistence.md` (RNode BLE + ATN BLE, RNode Classic + ATN BLE,
+  operator-managed RNode/goTenna switching with no software interlock, REM node and ATN plugin kept
+  running), `docs/goals/gotenna-plugin/architecture.md`,
+  `docs/goals/atn-rem-plugin/qualification.md` (nine unperformed gates with evidence and pass
+  criteria), and links from README, `docs/configuration.md` and `docs/device-support.md`.
+
+Local checks on 2026-10-17: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (105 tests: 57
+synthetic exchange tests, 3 new for GATT identity on connect, notification-characteristic binding
+and typed transport errors; 24 domain tests and the remaining workspace crates' tests) and
+`bash scripts/test-jni.sh` (PASS) passed. `scripts/build-android.sh --offline` (same SDK AAR
+`db90e2ecb239765c418ec471aee0f8a27e97c4e85ec048229d9d88ec0ff5fb29`, REM
+`91124cffd8f7fa7df94684b672c2228d97f0522d`, ARM64, NDK 27.0.12077973, Gradle 8.11.1, AGP 8.7.2,
+`REM_HOST_PACKAGE=network.reticulum.emergency`) passed: 4 JVM scheduler tests, lint with no
+issues, debug APK SHA-256 `d122fae05642b6f85dbcc207309c3d1e81f2de5542e0f5c01b2d98440dad0cff`,
+built with the synthetic all-zero host fingerprint, which cannot authenticate a real REM host.
+
+Status after Stage 4: **implemented but unproven**. Hardware qualification is deferred by the
+user; no gate in `docs/goals/atn-rem-plugin/qualification.md` has been performed, and no real REM
+host, RNode, ATN device or goTenna was exercised.

@@ -9,7 +9,7 @@ use super::{
     Adapter, Display, ENDED_SESSION_BOUND, InFlight, MAX_DISPLAY_SESSIONS, MarkerStyle, OP_NOTIFY,
     OP_SESSION_LIST, OP_SESSION_OBJECTS, OP_SESSION_STOP, Purpose, RELEASED_SLOT_BOUND,
     ReleasedSlot, RemMapObject, SelectedPle, SessionConfig, SyncSession, TERMINAL_SESSION_BOUND,
-    Value, decode, integer, json, marker_for_ple, text,
+    Value, WRITE_UUID, decode, gatt_uuid, integer, json, marker_for_ple, text,
 };
 use atn_domain::{DomainError, OperationKind};
 use atn_protocol::OpaqueReply;
@@ -704,7 +704,10 @@ impl Adapter {
             operation_id: integer(v, "operationId")?,
             frame_number: usize::try_from(integer(v, "frameNumber")?).map_err(|e| e.to_string())?,
         };
-        if !connection_matches || self.in_flight.as_ref() != Some(&echo) {
+        if !connection_matches
+            || !gatt_uuid(v, "characteristic", WRITE_UUID)
+            || self.in_flight.as_ref() != Some(&echo)
+        {
             return Ok(json!({"ignored":"stale transport callback"}));
         }
         self.in_flight = None;
@@ -717,7 +720,15 @@ impl Adapter {
             return Ok(json!({"ignored":"transport callback for ended session"}));
         };
         if !completed {
-            return Err("transport failed; explicit new session required".into());
+            // Typed platform error, e.g. `gattStatus`, `writeRejected`, `timeout`.
+            let code = v
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(Value::as_str)
+                .unwrap_or("unspecified");
+            return Err(format!(
+                "transport failed ({code}); explicit new session required"
+            ));
         }
         let report = self.displays[index]
             .sync
