@@ -12,6 +12,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, VecDeque},
+    hash::{BuildHasher, Hasher},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -49,8 +50,19 @@ struct Pending {
     deadline_ms: u64,
 }
 
-/// What REM did with one observation. Timeouts and Binder failures are never
-/// retried automatically; they stay distinct from a host rejection.
+/// Whether an indeterminate creation may still be resolved by REM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Resolution {
+    /// One replay of the same key and payload is due on a later tick.
+    ReplayScheduled,
+    /// The outcome stays unknown; nothing is retried.
+    Final,
+}
+
+/// What REM did with one observation. Timeouts and Binder failures stay
+/// distinct from a host rejection; they allow one bounded same-key replay
+/// within the same Binder host session and capture session, never more.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "camelCase")]
 pub enum HostOutcome {
@@ -60,6 +72,8 @@ pub enum HostOutcome {
     },
     ObserverRequested,
     CreateRequested,
+    /// The single replay of an indeterminate creation is outstanding.
+    ReplayRequested,
     #[serde(rename_all = "camelCase")]
     Created {
         object_destination_hash: String,
@@ -76,7 +90,16 @@ pub enum HostOutcome {
     #[serde(rename_all = "camelCase")]
     Unknown {
         reason: String,
+        resolution: Resolution,
     },
+}
+
+/// The exact creation request sent for one observation, kept in memory only
+/// so an indeterminate outcome can be replayed byte-for-byte once.
+struct CreateAttempt {
+    payload: Value,
+    replayed: bool,
+    replay_due_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -85,6 +108,21 @@ struct StoredObservation {
     id: u64,
     record: ObservationRecord,
     host: HostOutcome,
+    /// Capture session nonce in force when the measurement arrived.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capture_session: Option<String>,
+    #[serde(skip)]
+    create: Option<CreateAttempt>,
+}
+
+/// Operator-started authorization to turn this connection's measurements
+/// into REM markers. Process-local; never persisted or restored.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Capture {
+    nonce: String,
+    connection_id: String,
+    started_at_ms: u64,
 }
 
 /// Owns one ephemeral connection and at most one REM-authorized display session
@@ -106,6 +144,14 @@ pub struct Adapter {
     observations: VecDeque<StoredObservation>,
     pending: BTreeMap<String, Pending>,
     sequence: u64,
+    /// Symbol `map.symbols.list` confirmed for the current host session.
+    confirmed_symbol: Option<String>,
+    capture: Option<Capture>,
+    capture_ended: Option<String>,
+    /// Random per process; with `capture_count` it makes capture nonces, and
+    /// so idempotency keys, distinct from those of any earlier process.
+    process_nonce: u64,
+    capture_count: u64,
 }
 
 impl Default for Adapter {
@@ -131,6 +177,15 @@ impl Adapter {
             observations: VecDeque::new(),
             pending: BTreeMap::new(),
             sequence: 0,
+            confirmed_symbol: None,
+            capture: None,
+            capture_ended: None,
+            // std seeds `RandomState` from operating-system randomness. This is
+            // a collision guard, not a secret or an authorization token.
+            process_nonce: std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish(),
+            capture_count: 0,
         }
     }
 
@@ -148,7 +203,10 @@ impl Adapter {
             .and_then(Value::as_u64);
         let result = parsed.and_then(|value| self.handle(&value, &mut actions));
         match result {
-            Ok(result) => json!({"ok":true,"result":result,"actions":actions}).to_string(),
+            Ok(result) => {
+                self.enforce_capture_gate(&mut actions);
+                json!({"ok":true,"result":result,"actions":actions}).to_string()
+            }
             Err(message) => {
                 // Errors cannot retain partially authorized write work.
                 let mut actions = vec![json!({"kind":"cancelWrites"})];
@@ -158,6 +216,7 @@ impl Adapter {
                 if let Some(now) = now {
                     self.end_session_on_host(now, &mut actions);
                 }
+                self.enforce_capture_gate(&mut actions);
                 self.cancel_host_actions(&mut actions);
                 json!({"ok":false,"error":{"code":"adapter","message":message},"actions":actions})
                     .to_string()
@@ -176,6 +235,7 @@ impl Adapter {
             "configure" | "hostStarted" | "hostStopped" => self.lifecycle(cmd, v, now, actions),
             "connected" | "disconnected" => self.ble_state(cmd, v, now, actions),
             "confirmColocation" | "clearColocation" => self.colocation(cmd, v, now, actions),
+            "startCapture" | "stopCapture" => self.capture_control(cmd, now, actions),
             "notification" => self.notification(v, now, actions),
             "hostResponse" => self.host_response(v, now, actions),
             "hostEvent" => self.host_event(v, now, actions),
@@ -327,10 +387,24 @@ impl Adapter {
         Ok(())
     }
 
+    /// Next per-process capture nonce: `c<process>-<count>`, at most 38
+    /// ASCII-graphic characters.
+    fn mint_capture_nonce(&mut self) -> Result<String, String> {
+        self.capture_count = self
+            .capture_count
+            .checked_add(1)
+            .ok_or("capture identity exhausted")?;
+        Ok(format!(
+            "c{:016x}-{}",
+            self.process_nonce, self.capture_count
+        ))
+    }
+
     fn status(&self) -> Value {
         json!({"configured":self.config.is_some(),"connected":self.connection.is_some(),
             "hostStarted":self.host_started,"apiMinor":self.api_minor,"requiredApiMinor":REQUIRED_API_MINOR,
             "hostReady":self.host_ready,"colocationConfirmed":self.colocation.is_some(),
+            "capture":{"active":self.capture.is_some(),"session":self.capture,"lastEnded":self.capture_ended},
             "observerFresh":self.observer.is_some(),
             "session":self.session.as_ref().map(SyncSession::snapshot),
             "pendingHostRequests":self.pending.len(),"observations":self.observations})

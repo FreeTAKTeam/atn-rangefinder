@@ -51,9 +51,32 @@ pub struct AdapterConfig {
     pub max_queued_bytes: usize,
     pub queue_ttl_ms: u64,
     pub operation_timeout_ms: u64,
+    /// Delay before the single same-key replay of a marker creation whose
+    /// outcome became unknown within the same host and capture session.
+    pub create_retry_delay_ms: u64,
     pub max_observations: usize,
     pub transport: TransportConfig,
     pub png_limits: PngLimits,
+}
+
+impl HostMarkerPolicy {
+    fn validate(&self) -> Result<(), String> {
+        if self.symbol.trim().is_empty()
+            || !self.symbol.bytes().all(|b| b.is_ascii_graphic())
+            || self.symbol.len() > 64
+            || self.name_prefix.trim().is_empty()
+            || self.name_prefix.chars().count() > 64
+            || self
+                .category
+                .as_ref()
+                .is_some_and(|c| c.trim().is_empty() || c.chars().count() > 64)
+        {
+            return Err(
+                "host marker symbol, category and name prefix must be short nonempty text".into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 impl AdapterConfig {
@@ -65,21 +88,7 @@ impl AdapterConfig {
             .map_err(|e| e.to_string())?;
         self.eligibility.validate().map_err(|e| e.to_string())?;
         let t = &self.transport;
-        let marker = &self.host_marker;
-        if marker.symbol.trim().is_empty()
-            || !marker.symbol.bytes().all(|b| b.is_ascii_graphic())
-            || marker.symbol.len() > 64
-            || marker.name_prefix.trim().is_empty()
-            || marker.name_prefix.chars().count() > 64
-            || marker
-                .category
-                .as_ref()
-                .is_some_and(|c| c.trim().is_empty() || c.chars().count() > 64)
-        {
-            return Err(
-                "host marker symbol, category and name prefix must be short nonempty text".into(),
-            );
-        }
+        self.host_marker.validate()?;
         let mut slots = std::collections::BTreeSet::new();
         if self.slot_pool.is_empty()
             || self.slot_pool.len() > 128
@@ -107,6 +116,7 @@ impl AdapterConfig {
             || [
                 self.queue_ttl_ms,
                 self.operation_timeout_ms,
+                self.create_retry_delay_ms,
                 t.connect_timeout_ms,
                 t.write_timeout_ms,
                 t.host_request_timeout_ms,
@@ -131,6 +141,7 @@ impl AdapterConfig {
             ]
             .iter()
             .any(|v| *v > 3_600_000)
+            || self.create_retry_delay_ms > 3_600_000
             || self.queue_capacity > 4096
             || self.max_observations > 4096
             || self.max_queued_bytes > 16 * 1024 * 1024

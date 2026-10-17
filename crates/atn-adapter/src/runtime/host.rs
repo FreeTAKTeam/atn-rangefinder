@@ -25,6 +25,7 @@ impl Adapter {
                 pending.purpose,
                 "expired",
                 "host response after deadline",
+                now,
                 actions,
             );
         }
@@ -40,7 +41,7 @@ impl Adapter {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_owned();
-            return self.host_failure(pending.purpose, &code, &message, actions);
+            return self.host_failure(pending.purpose, &code, &message, now, actions);
         }
         let result = envelope.get("result").ok_or("host result required")?;
         self.host_success(pending.purpose, result, now, actions)?;
@@ -72,6 +73,7 @@ impl Adapter {
                 if !known {
                     return Err("configured marker symbol is not in the REM catalog".into());
                 }
+                self.confirmed_symbol = Some(wanted.to_owned());
                 self.host_ready = true;
                 self.request(
                     Purpose::SessionList,
@@ -156,28 +158,30 @@ impl Adapter {
 
     /// Typed failure handling: a marker creation keeps its own outcome, session
     /// lookups that answer `NotFound` end the session, permission loss makes
-    /// the adapter read-only, anything else cancels authorized work.
+    /// the adapter read-only and ends capture, anything else cancels
+    /// authorized work.
     fn host_failure(
         &mut self,
         purpose: Purpose,
         code: &str,
         message: &str,
+        now: u64,
         actions: &mut Vec<Value>,
     ) -> Result<Value, String> {
         let transient = code == "HostError" || code == "expired" || code.starts_with("binder.");
         match purpose {
             Purpose::Create(id) => {
-                let outcome = if transient {
-                    HostOutcome::Unknown {
-                        reason: format!("{code}: {message}"),
-                    }
+                if transient {
+                    self.creation_unknown(id, format!("{code}: {message}"), now);
                 } else {
-                    HostOutcome::Rejected {
-                        code: code.to_owned(),
-                        message: message.to_owned(),
-                    }
-                };
-                self.set_outcome(id, outcome);
+                    self.set_outcome(
+                        id,
+                        HostOutcome::Rejected {
+                            code: code.to_owned(),
+                            message: message.to_owned(),
+                        },
+                    );
+                }
                 if code != "PermissionDenied" {
                     return Ok(self.status());
                 }
@@ -205,6 +209,7 @@ impl Adapter {
             _ => {}
         }
         if code == "PermissionDenied" {
+            self.end_capture("map capability revoked (PermissionDenied)", actions);
             self.host_ready = false;
         }
         Err(format!("REM rejected map request ({code}): {message}"))

@@ -1,6 +1,6 @@
 use super::{
-    Adapter, AdapterConfig, OP_SESSION_LIST, OP_SYMBOLS_LIST, Purpose, REQUIRED_API_MINOR, Value,
-    decode, integer, json, text,
+    Adapter, AdapterConfig, Capture, HostOutcome, OP_SESSION_LIST, OP_SYMBOLS_LIST, Purpose,
+    REQUIRED_API_MINOR, Resolution, Value, decode, integer, json, text,
 };
 
 impl Adapter {
@@ -12,13 +12,14 @@ impl Adapter {
             match purpose {
                 Purpose::Create(id) => self.set_outcome(
                     id,
-                    super::HostOutcome::Unknown {
+                    HostOutcome::Unknown {
                         reason: reason.to_owned(),
+                        resolution: Resolution::Final,
                     },
                 ),
                 Purpose::Measurement(id) => self.set_outcome(
                     id,
-                    super::HostOutcome::Retained {
+                    HostOutcome::Retained {
                         reason: reason.to_owned(),
                     },
                 ),
@@ -27,8 +28,120 @@ impl Adapter {
         }
     }
 
+    /// Operator-started capture authorization for the current connection.
+    /// Refusals are reported without side effects on other work.
+    pub(super) fn capture_control(
+        &mut self,
+        cmd: &str,
+        now: u64,
+        actions: &mut Vec<Value>,
+    ) -> Result<Value, String> {
+        match cmd {
+            "startCapture" => {
+                if let Some(reason) = self.capture_refusal(now) {
+                    actions.push(
+                        json!({"kind":"status","message":format!("capture not started: {reason}")}),
+                    );
+                    return Ok(
+                        json!({"captureStarted":false,"reason":reason,"status":self.status()}),
+                    );
+                }
+                let connection_id = self
+                    .connection
+                    .as_ref()
+                    .map(|(id, _)| id.clone())
+                    .ok_or("BLE disconnected")?;
+                let nonce = self.mint_capture_nonce()?;
+                self.capture = Some(Capture {
+                    nonce,
+                    connection_id,
+                    started_at_ms: now,
+                });
+                self.capture_ended = None;
+                Ok(json!({"captureStarted":true,"status":self.status()}))
+            }
+            "stopCapture" => {
+                self.end_capture("operator stopped capture", actions);
+                Ok(self.status())
+            }
+            _ => Err(format!("unknown command {cmd}")),
+        }
+    }
+
+    fn capture_refusal(&self, now: u64) -> Option<String> {
+        if self.capture.is_some() {
+            return Some("capture already active".into());
+        }
+        if let Err(reason) = self.write_gate(now) {
+            return Some(reason);
+        }
+        let symbol = self.config.as_ref().map(|c| c.host_marker.symbol.as_str());
+        if self.confirmed_symbol.as_deref() != symbol {
+            return Some("configured marker symbol not confirmed by map.symbols.list".into());
+        }
+        None
+    }
+
+    /// Ends capture. Unanswered observer snapshots of the ended capture keep a
+    /// retained outcome and a scheduled replay becomes final; a creation
+    /// already sent keeps waiting for REM's answer, which is still recorded.
+    pub(super) fn end_capture(&mut self, reason: &str, actions: &mut Vec<Value>) {
+        if self.capture.take().is_none() {
+            return;
+        }
+        self.capture_ended = Some(reason.to_owned());
+        let measuring: Vec<(String, u64)> = self
+            .pending
+            .iter()
+            .filter_map(|(request, p)| match p.purpose {
+                Purpose::Measurement(id) => Some((request.clone(), id)),
+                _ => None,
+            })
+            .collect();
+        for (request, id) in &measuring {
+            self.pending.remove(request);
+            self.set_outcome(
+                *id,
+                HostOutcome::Retained {
+                    reason: format!("capture ended: {reason}"),
+                },
+            );
+        }
+        self.finalize_replays(reason);
+        if !measuring.is_empty() {
+            self.cancel_host_actions(actions);
+        }
+        actions.push(json!({"kind":"status","message":format!("capture ended: {reason}")}));
+    }
+
+    /// Capture never outlives the authorization it was started under.
+    pub(super) fn enforce_capture_gate(&mut self, actions: &mut Vec<Value>) {
+        let Some(capture) = &self.capture else {
+            return;
+        };
+        let reason = if !self.host_ready {
+            Some("REM map API unavailable")
+        } else if self.connection.as_ref().map(|(id, _)| id) != Some(&capture.connection_id) {
+            Some("BLE connection changed")
+        } else if self.colocation.is_none() {
+            Some("co-location confirmation withdrawn")
+        } else if !self
+            .config
+            .as_ref()
+            .is_some_and(|c| c.device_profile.protocol_verified)
+        {
+            Some("device profile unverified")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            self.end_capture(reason, actions);
+        }
+    }
+
     fn negotiate(&mut self, now: u64, actions: &mut Vec<Value>) -> Result<(), String> {
         self.host_ready = false;
+        self.confirmed_symbol = None;
         if !self.api_supported() {
             actions.push(json!({"kind":"status","message":format!("REM plugin API 1.{REQUIRED_API_MINOR} required; map exchange unavailable")}));
             return Ok(());
@@ -50,6 +163,7 @@ impl Adapter {
             "configure" => {
                 let config: AdapterConfig = decode(v, "config")?;
                 config.validate()?;
+                self.end_capture("configuration changed", actions);
                 self.cancel_session("configuration changed");
                 self.end_session_on_host(now, actions);
                 self.drop_observation_requests("configuration changed before host answered");
@@ -64,6 +178,7 @@ impl Adapter {
                 Ok(json!({"configured":true}))
             }
             "hostStarted" => {
+                self.end_capture("host restarted", actions);
                 self.cancel_session("host restarted");
                 self.drop_observation_requests("host restarted before answering");
                 self.pending.clear();
@@ -77,9 +192,11 @@ impl Adapter {
                 Ok(json!({"hostReady":false,"apiSupported":self.api_supported()}))
             }
             "hostStopped" => {
+                self.end_capture("host stopped", actions);
                 self.host_started = false;
                 self.api_minor = None;
                 self.host_ready = false;
+                self.confirmed_symbol = None;
                 self.connection = None;
                 self.colocation = None;
                 self.observer = None;
@@ -105,6 +222,7 @@ impl Adapter {
     ) -> Result<Value, String> {
         match cmd {
             "connected" => {
+                self.end_capture("new BLE connection", actions);
                 self.cancel_session("new BLE connection");
                 self.end_session_on_host(now, actions);
                 self.observer = None;
@@ -127,6 +245,7 @@ impl Adapter {
                 Ok(json!({"readOnly":true,"writeCapacity":capacity}))
             }
             "disconnected" => {
+                self.end_capture("BLE disconnected", actions);
                 self.connection = None;
                 self.observer = None;
                 self.colocation = None;
@@ -177,6 +296,7 @@ impl Adapter {
                 Ok(self.status())
             }
             "clearColocation" => {
+                self.end_capture("co-location confirmation withdrawn", actions);
                 self.colocation = None;
                 self.observer = None;
                 self.cancel_session("co-location confirmation withdrawn");
@@ -288,6 +408,7 @@ impl Adapter {
             }
             "tick" => {
                 self.expire_pending(now, actions)?;
+                self.replay_due(now, actions);
                 if let Some(session) = self.session.as_mut() {
                     if matches!(session.snapshot().state, atn_domain::SessionState::Active) {
                         session.tick(now).map_err(|e| e.to_string())?;
@@ -325,15 +446,12 @@ impl Adapter {
                 continue;
             };
             match pending.purpose {
-                Purpose::Create(id) => self.set_outcome(
-                    id,
-                    super::HostOutcome::Unknown {
-                        reason: "no host response before deadline".into(),
-                    },
-                ),
+                Purpose::Create(id) => {
+                    self.creation_unknown(id, "no host response before deadline".into(), now);
+                }
                 Purpose::Measurement(id) => self.set_outcome(
                     id,
-                    super::HostOutcome::Retained {
+                    HostOutcome::Retained {
                         reason: "observer snapshot timed out".into(),
                     },
                 ),

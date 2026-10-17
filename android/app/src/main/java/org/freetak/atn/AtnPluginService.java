@@ -41,6 +41,10 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
     private String status = "Enable the plugin in REM (API 1.3), grant its map capabilities, configure transport, then select and connect a device";
     private String lastNativeResult = "";
     private boolean syncAuthorized;
+    // Mirrors of native state for the UI only; Rust enforces both gates.
+    private boolean colocationConfirmed;
+    private boolean captureActive;
+    private String captureSummary = "Capture not started";
     private boolean foreground;
     private long nativeTickBoundMs;
     private final Runnable writeTimeout = () -> {
@@ -136,6 +140,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
     }
     static String summary() { AtnPluginService current = instance; return current == null ? "Plugin not running. Enable it and start the node in REM" : current.status; }
     static String nativeResult() { AtnPluginService current = instance; return current == null ? "" : current.lastNativeResult; }
+    static String captureStatus() { AtnPluginService current = instance; return current == null ? "Capture not started" : current.captureSummary; }
     void connectFromUi() {
         if (host == null) { status = "Start the REM node and enable this plugin first"; return; }
         try {
@@ -186,6 +191,22 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
             ? "Co-location confirmed. Share points with this plugin from REM's marker sheet to display them"
             : "Co-location confirmation rejected; inspect native status";
     }
+    /** Explicit, connection-scoped capture; never persisted and never restored. */
+    void startCaptureFromUi() {
+        if (!ble.ready() || host == null) { status = "Connect the selected device and REM first"; return; }
+        if (!colocationConfirmed) { status = "Confirm the phone is at the binocular before starting capture"; return; }
+        JSONObject response = call(command("startCapture"));
+        JSONObject result = response.optJSONObject("result");
+        if (result != null && result.optBoolean("captureStarted")) {
+            status = "Capture started. Each new measurement becomes a shared REM marker; earlier measurements are not published";
+        } else {
+            status = "Capture not started: " + (result == null ? "native request rejected" : result.optString("reason"));
+        }
+    }
+    void stopCaptureFromUi() {
+        call(command("stopCapture"));
+        status = "Capture stopped. Measurements stay raw and local";
+    }
     void clearColocationFromUi() {
         syncAuthorized = false;
         syncSessionId = "";
@@ -224,7 +245,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
     }
     private void endHost(String reason) {
         IRemPluginHost previous = host;
-        host = null; syncAuthorized = false; apiMinor = -1;
+        host = null; syncAuthorized = false; apiMinor = -1; captureActive = false; colocationConfirmed = false;
         handler.removeCallbacks(tick);
         if (previous != null && deathRecipient != null) previous.asBinder().unlinkToDeath(deathRecipient, 0);
         deathRecipient = null;
@@ -239,6 +260,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
         return new JSONObject().put("status", status).put("deviceAlias", preferences.alias())
             .put("connected", ble.ready()).put("writeCapacity", ble.ready() ? ble.capacity() : 0)
             .put("syncAuthorized", syncAuthorized).put("syncSessionId", syncSessionId)
+            .put("colocationConfirmed", colocationConfirmed).put("captureActive", captureActive).put("captureStatus", captureSummary)
             .put("apiMinor", apiMinor).put("requiredApiMinor", PluginProtocol.MAP_SESSION_API_MINOR)
             .put("nativeAvailable", NativeCore.available())
             .put("sdkCommit", BuildConfig.REM_SDK_COMMIT).put("sdkSha256", BuildConfig.REM_SDK_SHA256);
@@ -249,6 +271,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
             command.put("nowMs", System.currentTimeMillis());
             JSONObject response = new JSONObject(NativeCore.dispatch(command.toString()));
             lastNativeResult = response.toString();
+            mirrorCapture(response);
             if (!response.optBoolean("ok")) {
                 syncAuthorized = false;
                 discardWrites();
@@ -263,6 +286,20 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
             status = "Native boundary rejected malformed or unavailable action";
             return new JSONObject();
         }
+    }
+    /** Status-bearing responses (including every tick) carry the native capture state. */
+    private void mirrorCapture(JSONObject response) {
+        JSONObject result = response.optJSONObject("result");
+        if (result == null) return;
+        JSONObject state = result.has("capture") ? result : result.optJSONObject("status");
+        JSONObject capture = state == null ? null : state.optJSONObject("capture");
+        if (capture == null) return;
+        colocationConfirmed = state.optBoolean("colocationConfirmed");
+        captureActive = capture.optBoolean("active");
+        JSONObject session = capture.optJSONObject("session");
+        if (captureActive && session != null) captureSummary = "Capture active (" + session.optString("nonce") + ")";
+        else if (capture.isNull("lastEnded")) captureSummary = "Capture not started";
+        else captureSummary = "Capture stopped: " + capture.optString("lastEnded");
     }
     private void action(JSONObject action) throws JSONException {
         switch (action.getString("kind")) {
@@ -364,6 +401,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
     }
     @Override public void disconnected(String reason) {
         syncAuthorized = false;
+        captureActive = false;
         call(command("disconnected", "reason", reason));
         cancelWrites();
         stopForeground();

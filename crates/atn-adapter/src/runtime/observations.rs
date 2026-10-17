@@ -1,7 +1,7 @@
 use super::{
-    Adapter, BTreeMap, DECODER_VERSION, HOST_NAME_LIMIT, HOST_NOTES_LIMIT, HostOutcome,
-    InboundFrame, OP_MARKERS_CREATE, OP_OBSERVER_SNAPSHOT, ObservationRecord, Purpose,
-    StoredObservation, Value, decode, derive_draft, integer, json, parse_inbound,
+    Adapter, BTreeMap, CreateAttempt, DECODER_VERSION, HOST_NAME_LIMIT, HOST_NOTES_LIMIT,
+    HostOutcome, InboundFrame, OP_MARKERS_CREATE, OP_OBSERVER_SNAPSHOT, ObservationRecord, Purpose,
+    Resolution, StoredObservation, Value, decode, derive_draft, integer, json, parse_inbound,
 };
 use atn_domain::{BearingReference, DerivedDraft};
 
@@ -46,19 +46,29 @@ impl Adapter {
                 while self.observations.len() >= c.max_observations {
                     self.observations.pop_front();
                 }
-                let host = if self.host_ready {
+                // Only measurements arriving while capture is active on this
+                // connection are ever offered to REM.
+                let capture = self
+                    .capture
+                    .as_ref()
+                    .filter(|capture| capture.connection_id == connection.0)
+                    .map(|capture| capture.nonce.clone());
+                let host = if capture.is_some() {
                     HostOutcome::ObserverRequested
                 } else {
                     HostOutcome::Retained {
-                        reason: "REM map API unavailable".into(),
+                        reason: "capture not started".into(),
                     }
                 };
+                let capturing = capture.is_some();
                 self.observations.push_back(StoredObservation {
                     id,
                     record: record.clone(),
                     host: host.clone(),
+                    capture_session: capture,
+                    create: None,
                 });
-                if self.host_ready {
+                if capturing {
                     self.request(
                         Purpose::Measurement(id),
                         OP_OBSERVER_SNAPSHOT,
@@ -96,23 +106,128 @@ impl Adapter {
         }
     }
 
-    /// Creates one ordinary shared REM marker for an eligible observation. The
-    /// idempotency key is the connection-scoped observation identity, so the
-    /// host can never mint a second marker for the same observation.
+    /// Records an indeterminate creation. Exactly one replay of the same key
+    /// and payload is scheduled when the observation's capture session is
+    /// still active in this Binder host session and it was not replayed yet.
+    pub(super) fn creation_unknown(&mut self, id: u64, reason: String, now: u64) {
+        let delay = self.config.as_ref().map(|c| c.create_retry_delay_ms);
+        let capture = self.capture.as_ref().map(|c| c.nonce.clone());
+        let host_ready = self.host_ready;
+        let Some(stored) = self.observations.iter_mut().find(|o| o.id == id) else {
+            return;
+        };
+        let same_capture = capture.is_some() && stored.capture_session == capture;
+        let due = delay.and_then(|d| now.checked_add(d));
+        let resolution = match stored.create.as_mut() {
+            Some(attempt) if !attempt.replayed && same_capture && host_ready && due.is_some() => {
+                attempt.replay_due_ms = due;
+                Resolution::ReplayScheduled
+            }
+            _ => Resolution::Final,
+        };
+        stored.host = HostOutcome::Unknown { reason, resolution };
+    }
+
+    /// Withdraws every scheduled replay; their outcomes stay unknown.
+    pub(super) fn finalize_replays(&mut self, why: &str) {
+        for stored in &mut self.observations {
+            if let HostOutcome::Unknown {
+                reason,
+                resolution: resolution @ Resolution::ReplayScheduled,
+            } = &mut stored.host
+            {
+                *reason = format!("{reason}; replay withdrawn: {why}");
+                *resolution = Resolution::Final;
+                if let Some(attempt) = stored.create.as_mut() {
+                    attempt.replay_due_ms = None;
+                }
+            }
+        }
+    }
+
+    /// Sends due replays. REM answers a known key with the original marker
+    /// (`created:false`) or creates it once; nothing is replayed twice.
+    pub(super) fn replay_due(&mut self, now: u64, actions: &mut Vec<Value>) {
+        let capture = self.capture.as_ref().map(|c| c.nonce.clone());
+        let due: Vec<(u64, bool, Value)> = self
+            .observations
+            .iter_mut()
+            .filter(|o| {
+                matches!(
+                    o.host,
+                    HostOutcome::Unknown {
+                        resolution: Resolution::ReplayScheduled,
+                        ..
+                    }
+                )
+            })
+            .filter_map(|o| {
+                let attempt = o.create.as_mut()?;
+                if attempt.replay_due_ms.is_none_or(|due| due > now) {
+                    return None;
+                }
+                attempt.replayed = true;
+                attempt.replay_due_ms = None;
+                let same = capture.is_some() && o.capture_session == capture;
+                Some((o.id, same, attempt.payload.clone()))
+            })
+            .collect();
+        for (id, same_capture, payload) in due {
+            let outcome = if !same_capture || !self.host_ready {
+                HostOutcome::Unknown {
+                    reason: "replay withdrawn: capture or host session ended".into(),
+                    resolution: Resolution::Final,
+                }
+            } else {
+                match self.request(
+                    Purpose::Create(id),
+                    OP_MARKERS_CREATE,
+                    payload,
+                    now,
+                    actions,
+                ) {
+                    Ok(()) => HostOutcome::ReplayRequested,
+                    Err(error) => HostOutcome::Unknown {
+                        reason: format!("replay not sent: {error}"),
+                        resolution: Resolution::Final,
+                    },
+                }
+            };
+            self.set_outcome(id, outcome);
+        }
+    }
+
+    /// Creates one ordinary shared REM marker for an eligible observation of
+    /// the active capture. The idempotency key is
+    /// `<captureNonce>/<connectionId>/<observation>`, so the host can never
+    /// mint a second marker for the same observation, even across processes.
     pub(super) fn create_marker(
         &mut self,
         id: u64,
         now: u64,
         actions: &mut Vec<Value>,
     ) -> Result<(), String> {
-        let Some(record) = self
+        let Some((record, capture)) = self
             .observations
             .iter()
             .find(|o| o.id == id)
-            .map(|o| o.record.clone())
+            .map(|o| (o.record.clone(), o.capture_session.clone()))
         else {
             actions
                 .push(json!({"kind":"status","message":"observation evicted before derivation"}));
+            return Ok(());
+        };
+        let Some(nonce) = capture.filter(|nonce| {
+            self.capture
+                .as_ref()
+                .is_some_and(|active| &active.nonce == nonce)
+        }) else {
+            self.set_outcome(
+                id,
+                HostOutcome::Retained {
+                    reason: "capture ended before creation".into(),
+                },
+            );
             return Ok(());
         };
         let c = self.config.as_ref().ok_or("configuration required")?;
@@ -145,7 +260,7 @@ impl Adapter {
                 return Ok(());
             }
         };
-        let key = format!("{}/{id}", record.source_session);
+        let key = format!("{nonce}/{}/{id}", record.source_session);
         if key.len() > 128 || !key.bytes().all(|b| b.is_ascii_graphic()) {
             self.set_outcome(
                 id,
@@ -165,7 +280,14 @@ impl Adapter {
         if let Some(category) = &c.host_marker.category {
             payload["category"] = json!(category);
         }
-        self.set_outcome(id, HostOutcome::CreateRequested);
+        if let Some(stored) = self.observations.iter_mut().find(|o| o.id == id) {
+            stored.host = HostOutcome::CreateRequested;
+            stored.create = Some(CreateAttempt {
+                payload: payload.clone(),
+                replayed: false,
+                replay_due_ms: None,
+            });
+        }
         self.request(
             Purpose::Create(id),
             OP_MARKERS_CREATE,

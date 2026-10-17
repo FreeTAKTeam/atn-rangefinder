@@ -51,6 +51,7 @@ public final class SettingsActivity extends Activity {
     private TextView status;
     private TextView alias;
     private TextView details;
+    private TextView capture;
     private EditText transport;
     private EditText config;
     private EditText selection;
@@ -68,6 +69,7 @@ public final class SettingsActivity extends Activity {
         @Override public void run() {
             status.setText(AtnPluginService.summary());
             details.setText(AtnPluginService.nativeResult());
+            capture.setText(AtnPluginService.captureStatus());
             handler.postDelayed(this, 1000L);
         }
     };
@@ -80,7 +82,7 @@ public final class SettingsActivity extends Activity {
         layout = new LinearLayout(this); layout.setOrientation(LinearLayout.VERTICAL); layout.setPadding(24, 24, 24, 24);
         scroll.addView(layout); setContentView(scroll);
         text("ATN Rangefinder", 24);
-        text("Enable and trust this plugin in REM 1.5.1 or later (plugin API 1.3) and grant its map capabilities. Configure policies below, choose a device, then connect. A connection starts read-only. Eligible measurements become shared REM markers; points you share with this plugin from a REM marker sheet are displayed on the device.", 16);
+        text("Enable and trust this plugin in REM 1.5.1 or later (plugin API 1.3) and grant its map capabilities. Configure policies below, choose a device, then connect. A connection starts read-only. After you confirm co-location and start capture, each new eligible measurement becomes a shared REM marker; points you share with this plugin from a REM marker sheet are displayed on the device.", 16);
         status = text("", 16);
         alias = text(preferences.alias(), 16);
         button("Grant Bluetooth permissions", this::requestBluetoothPermissions);
@@ -114,6 +116,11 @@ public final class SettingsActivity extends Activity {
             AtnPluginService.ui(service -> service.confirmColocationFromUi(evidence));
         });
         button("Withdraw co-location confirmation", () -> AtnPluginService.ui(AtnPluginService::clearColocationFromUi));
+        text("Measurement capture", 20);
+        text("Start capture after confirming co-location. While capture runs, each new measurement from this connection becomes one shared REM marker. Measurements taken before Start stay local and are never published. Capture ends on Stop, disconnect, REM host restart, a configuration change, withdrawn co-location or revoked map capability, and is never restored.", 16);
+        capture = text(AtnPluginService.captureStatus(), 16);
+        button("Start capture", () -> AtnPluginService.ui(AtnPluginService::startCaptureFromUi));
+        button("Stop capture", () -> AtnPluginService.ui(AtnPluginService::stopCaptureFromUi));
         text("Display sessions start from REM: open a marker's details sheet and choose Share with ATN Rangefinder. Slots are taken from the configured slot pool in REM's selection order; a selection larger than the pool is rejected and stopped. Stop a session here or with REM's Stop control.", 16);
         button("Stop display session", () -> AtnPluginService.ui(AtnPluginService::stopSyncFromUi));
         text("Style for the authorized selected set", 20);

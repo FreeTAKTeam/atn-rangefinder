@@ -14,7 +14,7 @@
   "eligibility":{"maxObserverAgeMs":1000,"maxObservationAgeMs":1000,"maxDeclinationAgeMs":1000,"maxHorizontalAccuracyM":5.0},
   "pitchPolicy":"horizontalDisplay", "markerType":0, "color":4,
   "queueCapacity":8, "maxQueuedBytes":65536, "queueTtlMs":5000,
-  "operationTimeoutMs":3000, "maxObservations":8,
+  "operationTimeoutMs":3000, "createRetryDelayMs":500, "maxObservations":8,
   "transport":{"requestMtu":512,"connectTimeoutMs":10000,"writeTimeoutMs":3000,"hostRequestTimeoutMs":2000,"maxPendingHostRequests":16,"maxQueuedWrites":1,"scanTimeoutMs":5000},
   "pngLimits":{"maxEncodedBytes":65535,"maxWidth":40,"maxHeight":40,"maxPixels":1600,"maxDecodedBytes":6440,"maxChunks":128,"expectedDimensions":[40,40]}
 }

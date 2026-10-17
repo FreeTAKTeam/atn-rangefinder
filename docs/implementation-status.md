@@ -96,3 +96,46 @@ on a device, physical binocular rendering, and the echo check for outbound displ
 Remaining stages: explicit Start/Stop capture controls and bounded result-unknown resolution
 (Stage 2), concurrent sessions with disjoint allocations and periodic reconciliation (Stage 3),
 goTenna compatibility notes (Stage 4), hardware qualification.
+
+## Automatic measurement capture (2026-10-17, Stage 2 of `docs/goals/atn-rem-plugin/plan.md`)
+
+- `crates/atn-adapter`: native `startCapture`/`stopCapture`. Start requires host ready with the
+  configured `hostMarker.symbol` confirmed by `map.symbols.list`, a connection, a
+  `protocolVerified` profile, valid semantics and the connection's co-location confirmation;
+  refusals return `captureStarted:false` with a reason. Outside capture, measurements are decoded
+  and retained as `retained {"capture not started"}` with no observer snapshot or marker creation.
+  Capture ends on stop, disconnect, new connection, `hostStarted`, `hostStopped`, `configure`,
+  `clearColocation` and `PermissionDenied`, plus a gate check after every native call; it is never
+  persisted and a new capture never publishes earlier observations. Status shows
+  `capture {active, session, lastEnded}` and each observation's `captureSession`.
+- Idempotency keys are `<captureNonce>/<connectionId>/<sequence>`; the nonce `c<16 hex>-<n>` is
+  minted in Rust from one OS-seeded `RandomState` draw per process and a per-process capture
+  counter. Android supplies nothing new.
+- An unknown creation (timeout, `HostError`, `expired`, `binder.*`) gets exactly one replay of the
+  identical key and payload from the first tick after the new required `createRetryDelayMs`, only
+  while the same Binder host session and capture session are active. After it, or once capture,
+  host or connection ends, the outcome is `unknown {resolution:"final"}` permanently.
+- Android: **Start capture** / **Stop capture** buttons and capture status in `SettingsActivity`;
+  `AtnPluginService` refuses Start without co-location, mirrors capture state from native status
+  responses (every tick) into the configuration page state, and keeps all JNI calls on its one
+  handler. `rem-plugin-config/index.html`, `docs/map-contract.md`, `docs/configuration.md`,
+  `android/README.md` and the handoff were updated; `examples/synthetic-config.json` gained
+  `createRetryDelayMs`.
+
+Local checks on 2026-10-17: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (41 synthetic
+exchange tests, 10 of them new for capture gating, automatic end on each trigger, nonce/key shape,
+one-shot replay returning `created:false`, failed replay staying final, replay withdrawal on host
+restart, disconnect and capture stop, and no historical publication; plus 1 parser, 23 domain and
+the remaining workspace crates' tests) and `bash scripts/test-jni.sh` (PASS) passed.
+`scripts/build-android.sh --offline` (ARM64, NDK 27.0.12077973, Gradle 8.11.1, AGP 8.7.2) with the
+same SDK AAR (SHA-256 `db90e2ecb239765c418ec471aee0f8a27e97c4e85ec048229d9d88ec0ff5fb29`, REM
+`91124cffd8f7fa7df94684b672c2228d97f0522d`) and `REM_HOST_PACKAGE=network.reticulum.emergency`
+passed: 4 JVM scheduler tests, lint with no issues, debug APK SHA-256
+`7cf032b6ed2d1a0ad77b08f1f7b200dd00659c9c8eefbfbaa703adfc2f6e91b8`. The APK carries the synthetic
+all-zero host fingerprint and cannot authenticate a real REM host.
+
+Status after Stage 2: **implemented but unproven**. Not performed: a real REM 1.5.1 host binding,
+real `map.markers.create` replay behaviour and marker visibility, Binder death/timeout on a device,
+Android UI interaction on a phone, and any ATN hardware. Remaining: Stage 3 (concurrent sessions,
+reconciliation interval, `notifications.raise`), Stage 4 notes, hardware qualification.

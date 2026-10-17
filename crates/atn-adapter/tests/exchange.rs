@@ -125,6 +125,36 @@ fn colocate(a: &mut Adapter) {
         respond(a, list, json!({"items":[]}));
     }
 }
+fn start_capture(a: &mut Adapter) -> Value {
+    let v = call(a, json!({"cmd":"startCapture"}));
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["result"]["captureStarted"], true, "{v}");
+    v
+}
+fn capture_status(a: &mut Adapter) -> Value {
+    call(a, json!({"cmd":"status"}))["result"]["capture"].clone()
+}
+/// Ready, co-located and capturing on `synthetic-connection`.
+fn capturing() -> Adapter {
+    let mut a = connected();
+    ready(&mut a);
+    colocate(&mut a);
+    start_capture(&mut a);
+    a
+}
+/// Takes one observation through to a `map.markers.create` request.
+fn create_request(a: &mut Adapter) -> Value {
+    let v = observe(a);
+    let v = respond(
+        a,
+        &request(&v, "map.observer.snapshot"),
+        snapshot(0.0, 10000),
+    );
+    request(&v, "map.markers.create")
+}
+fn host_state(a: &mut Adapter, index: usize) -> Value {
+    call(a, json!({"cmd":"status"}))["result"]["observations"][index]["host"].clone()
+}
 /// Operator shares one point; the adapter authorizes slot 2 and emits the first write.
 fn sync(a: &mut Adapter) -> Value {
     colocate(a);
@@ -229,9 +259,7 @@ fn permission_denial_on_catalog_fails_closed() {
 
 #[test]
 fn observation_creates_one_idempotent_shared_marker() {
-    let mut a = connected();
-    ready(&mut a);
-    colocate(&mut a);
+    let mut a = capturing();
     let v = observe(&mut a);
     assert_eq!(v["result"]["host"]["state"], "observerRequested");
     let v = respond(
@@ -242,7 +270,7 @@ fn observation_creates_one_idempotent_shared_marker() {
     let create = request(&v, "map.markers.create");
     let payload = &create["payload"];
     let key = payload["idempotencyKey"].as_str().unwrap();
-    assert!(key.starts_with("synthetic-connection/"));
+    assert!(key.contains("/synthetic-connection/"));
     assert_eq!(payload["symbol"], "marker");
     assert!(
         payload["name"]
@@ -287,9 +315,7 @@ fn observation_creates_one_idempotent_shared_marker() {
 
 #[test]
 fn ineligible_observer_retains_raw_without_marker_creation() {
-    let mut a = connected();
-    ready(&mut a);
-    colocate(&mut a);
+    let mut a = capturing();
     let v = observe(&mut a);
     let v = respond(
         &mut a,
@@ -319,15 +345,20 @@ fn ineligible_observer_retains_raw_without_marker_creation() {
 fn unconfirmed_colocation_blocks_creation_and_rejects_sessions() {
     let mut a = connected();
     ready(&mut a);
-    let v = observe(&mut a);
-    let v = respond(
-        &mut a,
-        &request(&v, "map.observer.snapshot"),
-        snapshot(0.0, 10000),
+    let v = call(&mut a, json!({"cmd":"startCapture"}));
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["result"]["captureStarted"], false);
+    assert!(
+        v["result"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("binocular")
     );
-    let host = &v["result"]["observations"][0]["host"];
+    let v = observe(&mut a);
+    assert!(!has_action(&v, "hostRequest"));
+    let host = &v["result"]["host"];
     assert_eq!(host["state"], "retained");
-    assert!(host["reason"].as_str().unwrap().contains("co-location"));
+    assert_eq!(host["reason"], "capture not started");
     let v = started(&mut a, "shared-early", &[object("p", 0.001, T1)]);
     assert_eq!(v["ok"], true);
     assert!(!has_action(&v, "sessionAuthorized"));
@@ -342,9 +373,7 @@ fn unconfirmed_colocation_blocks_creation_and_rejects_sessions() {
 
 #[test]
 fn create_rejection_timeout_and_binder_failure_stay_distinct() {
-    let mut a = connected();
-    ready(&mut a);
-    colocate(&mut a);
+    let mut a = capturing();
     let v = observe(&mut a);
     let v = respond(
         &mut a,
@@ -381,7 +410,9 @@ fn create_rejection_timeout_and_binder_failure_stay_distinct() {
         snapshot(0.0, 10000),
     );
     let v = fail(&mut a, &request(&v, "map.markers.create"), "binder.timeout");
-    assert_eq!(v["result"]["observations"][2]["host"]["state"], "unknown");
+    let host = &v["result"]["observations"][2]["host"];
+    assert_eq!(host["state"], "unknown");
+    assert_eq!(host["resolution"], "replayScheduled");
     let v = observe(&mut a);
     let v = respond(
         &mut a,
@@ -398,6 +429,11 @@ fn create_rejection_timeout_and_binder_failure_stay_distinct() {
         call(&mut a, json!({"cmd":"status"}))["result"]["hostReady"],
         false
     );
+    // Revocation ended capture, so the scheduled replay can never run.
+    let host = host_state(&mut a, 2);
+    assert_eq!(host["state"], "unknown");
+    assert_eq!(host["resolution"], "final");
+    assert_eq!(capture_status(&mut a)["active"], false);
 }
 
 #[test]
@@ -926,4 +962,324 @@ fn host_stop_and_restart_clear_everything_without_replay() {
     let v = call(&mut a, json!({"cmd":"hostStarted","apiMinor":3}));
     request(&v, "map.symbols.list");
     assert!(!has_action(&v, "write"));
+}
+
+#[test]
+fn measurements_stay_raw_until_capture_starts() {
+    let mut a = connected();
+    ready(&mut a);
+    colocate(&mut a);
+    let v = observe(&mut a);
+    assert_eq!(v["actions"], json!([]));
+    assert_eq!(v["result"]["host"]["state"], "retained");
+    assert_eq!(v["result"]["host"]["reason"], "capture not started");
+    assert_eq!(v["result"]["observation"]["raw"]["distance"], 120);
+    let status = capture_status(&mut a);
+    assert_eq!(status["active"], false);
+    assert_eq!(status["session"], Value::Null);
+    let v = start_capture(&mut a);
+    let session = &v["result"]["status"]["capture"]["session"];
+    assert_eq!(session["connectionId"], "synthetic-connection");
+    assert_eq!(session["startedAtMs"], 10000);
+    // Starting capture never offers the earlier measurement to REM.
+    assert!(!has_action(&v, "hostRequest"));
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":10600}));
+    assert!(requests(&v, "map.observer.snapshot").is_empty());
+    assert!(requests(&v, "map.markers.create").is_empty());
+    assert_eq!(host_state(&mut a, 0)["reason"], "capture not started");
+    let v = observe(&mut a);
+    assert_eq!(v["result"]["host"]["state"], "observerRequested");
+}
+
+#[test]
+fn start_capture_requires_host_connection_profile_semantics_and_colocation() {
+    let refused = |a: &mut Adapter, needle: &str| {
+        let v = call(a, json!({"cmd":"startCapture"}));
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["result"]["captureStarted"], false, "{v}");
+        assert!(!has_action(&v, "cancelWrites"));
+        let reason = v["result"]["reason"].as_str().unwrap();
+        assert!(reason.contains(needle), "{reason}");
+    };
+    let mut a = connected();
+    refused(&mut a, "REM map API");
+    ready(&mut a);
+    refused(&mut a, "binocular");
+    call(&mut a, json!({"cmd":"disconnected"}));
+    refused(&mut a, "disconnected");
+    let mut a = Adapter::new();
+    let mut c = config();
+    c["deviceProfile"]["protocolVerified"] = json!(false);
+    call(&mut a, json!({"cmd":"configure","config":c}));
+    call(
+        &mut a,
+        json!({"cmd":"connected","connectionId":"synthetic-connection","writeCapacity":509}),
+    );
+    ready(&mut a);
+    colocate(&mut a);
+    refused(&mut a, "not verified");
+    let mut a = Adapter::new();
+    let mut c = config();
+    c["semantics"]["calibrationConfirmed"] = json!(false);
+    call(&mut a, json!({"cmd":"configure","config":c}));
+    call(
+        &mut a,
+        json!({"cmd":"connected","connectionId":"synthetic-connection","writeCapacity":509}),
+    );
+    ready(&mut a);
+    colocate(&mut a);
+    let v = call(&mut a, json!({"cmd":"startCapture"}));
+    assert_eq!(v["result"]["captureStarted"], false, "{v}");
+    // A second start keeps the active capture and its nonce.
+    let mut a = capturing();
+    let nonce = capture_status(&mut a)["session"]["nonce"].clone();
+    refused(&mut a, "already active");
+    assert_eq!(capture_status(&mut a)["session"]["nonce"], nonce);
+}
+
+#[test]
+fn capture_ends_on_every_authorization_change() {
+    let triggers: Vec<(&str, Value)> = vec![
+        ("operator stopped capture", json!({"cmd":"stopCapture"})),
+        ("BLE disconnected", json!({"cmd":"disconnected"})),
+        (
+            "new BLE connection",
+            json!({"cmd":"connected","connectionId":"other","writeCapacity":509}),
+        ),
+        ("host stopped", json!({"cmd":"hostStopped"})),
+        ("host restarted", json!({"cmd":"hostStarted","apiMinor":3})),
+        (
+            "configuration changed",
+            json!({"cmd":"configure","config":config()}),
+        ),
+        (
+            "co-location confirmation withdrawn",
+            json!({"cmd":"clearColocation"}),
+        ),
+    ];
+    for (reason, command) in triggers {
+        let mut a = capturing();
+        let v = call(&mut a, command);
+        assert_eq!(v["ok"], true, "{reason}: {v}");
+        let status = capture_status(&mut a);
+        assert_eq!(status["active"], false, "{reason}");
+        assert_eq!(status["lastEnded"], reason);
+        let v = observe(&mut a);
+        if v["ok"] == true {
+            assert_eq!(v["result"]["host"]["reason"], "capture not started");
+            assert!(requests(&v, "map.observer.snapshot").is_empty());
+        }
+    }
+    // Capability revocation on an observer snapshot ends capture too.
+    let mut a = capturing();
+    let v = observe(&mut a);
+    let v = fail(
+        &mut a,
+        &request(&v, "map.observer.snapshot"),
+        "PermissionDenied",
+    );
+    assert_eq!(v["ok"], false);
+    let status = capture_status(&mut a);
+    assert_eq!(status["active"], false);
+    assert!(
+        status["lastEnded"]
+            .as_str()
+            .unwrap()
+            .contains("PermissionDenied")
+    );
+}
+
+#[test]
+fn idempotency_key_carries_a_fresh_capture_nonce() {
+    let mut a = capturing();
+    let first_nonce = capture_status(&mut a)["session"]["nonce"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (process, count) = first_nonce[1..].split_once('-').unwrap();
+    assert!(first_nonce.starts_with('c'));
+    assert_eq!(process.len(), 16);
+    assert!(process.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_eq!(count, "1");
+    let create = create_request(&mut a);
+    let key = create["payload"]["idempotencyKey"].as_str().unwrap();
+    let parts: Vec<&str> = key.split('/').collect();
+    assert_eq!(parts[0], first_nonce);
+    assert_eq!(parts[1], "synthetic-connection");
+    assert!(parts[2].parse::<u64>().is_ok());
+    assert!(key.len() <= 128 && key.bytes().all(|b| b.is_ascii_graphic()));
+    call(&mut a, json!({"cmd":"stopCapture"}));
+    start_capture(&mut a);
+    let second_nonce = capture_status(&mut a)["session"]["nonce"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(second_nonce, first_nonce);
+    assert_eq!(second_nonce, format!("c{process}-2"));
+    let second = create_request(&mut a);
+    assert!(
+        second["payload"]["idempotencyKey"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{second_nonce}/"))
+    );
+    // Another process draws a different random component.
+    let mut b = capturing();
+    let other = capture_status(&mut b)["session"]["nonce"].clone();
+    assert_ne!(other, json!(first_nonce));
+}
+
+#[test]
+fn unknown_creation_is_replayed_once_with_the_same_key_and_payload() {
+    let mut a = capturing();
+    let create = create_request(&mut a);
+    let v = fail(&mut a, &create, "HostError");
+    assert_eq!(v["ok"], true);
+    let host = &v["result"]["observations"][0]["host"];
+    assert_eq!(host["state"], "unknown");
+    assert_eq!(host["resolution"], "replayScheduled");
+    // Nothing before the configured delay (synthetic 500 ms).
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":10499}));
+    assert!(requests(&v, "map.markers.create").is_empty());
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":10500}));
+    let replay = request(&v, "map.markers.create");
+    assert_eq!(replay["payload"], create["payload"]);
+    assert_ne!(replay["requestId"], create["requestId"]);
+    assert_eq!(host_state(&mut a, 0)["state"], "replayRequested");
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":10600}));
+    assert!(requests(&v, "map.markers.create").is_empty());
+    // REM recognises the key and returns the original marker.
+    let v = respond_at(
+        &mut a,
+        &replay,
+        json!({"marker":object("host-minted",0.0,T1),"created":false}),
+        10600,
+    );
+    let host = &v["result"]["observations"][0]["host"];
+    assert_eq!(host["state"], "alreadyExisted");
+    assert_eq!(host["objectDestinationHash"], "host-minted");
+}
+
+#[test]
+fn a_failed_replay_stays_unknown_and_is_never_repeated() {
+    let mut a = capturing();
+    let create = create_request(&mut a);
+    fail(&mut a, &create, "binder.timeout");
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":10500}));
+    let replay = request(&v, "map.markers.create");
+    // The replay times out as well (synthetic hostRequestTimeoutMs 2000).
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":12500}));
+    assert_eq!(v["ok"], true, "{v}");
+    assert!(requests(&v, "map.markers.create").is_empty());
+    let host = host_state(&mut a, 0);
+    assert_eq!(host["state"], "unknown");
+    assert_eq!(host["resolution"], "final");
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":20000}));
+    assert!(requests(&v, "map.markers.create").is_empty());
+    let v = respond_at(
+        &mut a,
+        &replay,
+        json!({"marker":object("late",0.0,T1),"created":true}),
+        20000,
+    );
+    assert_eq!(v["result"]["ignored"], "unmatched host response");
+}
+
+#[test]
+fn replay_is_withdrawn_by_host_restart() {
+    let mut a = capturing();
+    let create = create_request(&mut a);
+    fail(&mut a, &create, "HostError");
+    ready(&mut a); // hostStarted: a new Binder host session
+    let host = host_state(&mut a, 0);
+    assert_eq!(host["state"], "unknown");
+    assert_eq!(host["resolution"], "final");
+    assert!(host["reason"].as_str().unwrap().contains("host restarted"));
+    start_capture(&mut a);
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":11000}));
+    assert!(requests(&v, "map.markers.create").is_empty());
+}
+
+#[test]
+fn replay_is_withdrawn_by_disconnect_and_capture_stop() {
+    let mut a = capturing();
+    let create = create_request(&mut a);
+    fail(&mut a, &create, "HostError");
+    call(&mut a, json!({"cmd":"disconnected"}));
+    call(
+        &mut a,
+        json!({"cmd":"connected","connectionId":"synthetic-connection","writeCapacity":509}),
+    );
+    colocate(&mut a);
+    start_capture(&mut a);
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":11000}));
+    assert!(requests(&v, "map.markers.create").is_empty());
+    assert_eq!(host_state(&mut a, 0)["resolution"], "final");
+    // Stopping capture withdraws a replay as well.
+    let create = create_request(&mut a);
+    fail(&mut a, &create, "HostError");
+    assert_eq!(host_state(&mut a, 1)["resolution"], "replayScheduled");
+    call(&mut a, json!({"cmd":"stopCapture"}));
+    start_capture(&mut a);
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":11000}));
+    assert!(requests(&v, "map.markers.create").is_empty());
+    assert_eq!(host_state(&mut a, 1)["resolution"], "final");
+}
+
+#[test]
+fn stopping_capture_drops_unanswered_snapshots_and_restart_publishes_nothing_old() {
+    let mut a = capturing();
+    let v = observe(&mut a);
+    let snap = request(&v, "map.observer.snapshot");
+    let v = call(&mut a, json!({"cmd":"stopCapture"}));
+    let cancel = v["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["kind"] == "cancelHostRequests")
+        .unwrap_or_else(|| panic!("cancelHostRequests in {v}"))
+        .clone();
+    assert!(
+        !cancel["keepRequestIds"]
+            .as_array()
+            .unwrap()
+            .contains(&snap["requestId"])
+    );
+    let host = host_state(&mut a, 0);
+    assert_eq!(host["state"], "retained");
+    assert!(host["reason"].as_str().unwrap().contains("capture ended"));
+    let v = respond(&mut a, &snap, snapshot(0.0, 10000));
+    assert_eq!(v["result"]["ignored"], "unmatched host response");
+    // A creation already sent keeps REM's answer after capture stops.
+    start_capture(&mut a);
+    let create = create_request(&mut a);
+    call(&mut a, json!({"cmd":"stopCapture"}));
+    let v = respond(
+        &mut a,
+        &create,
+        json!({"marker":object("host-minted",0.0,T1),"created":true}),
+    );
+    assert_eq!(v["result"]["observations"][1]["host"]["state"], "created");
+    let v = start_capture(&mut a);
+    assert!(!has_action(&v, "hostRequest"));
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":11000}));
+    assert!(!has_action(&v, "hostRequest"));
+    assert_eq!(host_state(&mut a, 0)["state"], "retained");
+}
+
+#[test]
+fn retry_delay_is_explicit_configuration() {
+    let mut a = Adapter::new();
+    let mut c = config();
+    c.as_object_mut().unwrap().remove("createRetryDelayMs");
+    assert_eq!(
+        call(&mut a, json!({"cmd":"configure","config":c}))["ok"],
+        false
+    );
+    let mut c = config();
+    c["createRetryDelayMs"] = json!(0);
+    assert_eq!(
+        call(&mut a, json!({"cmd":"configure","config":c}))["ok"],
+        false
+    );
 }
