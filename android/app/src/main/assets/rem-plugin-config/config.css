@@ -1,4 +1,22 @@
-body { font: 16px system-ui, sans-serif; color: #192e38; background: #edf3f5; margin: 0; }
-main { max-width: 44rem; padding: 1.5rem; margin: auto; }
-button { font: inherit; padding: .8rem 1rem; border-radius: .5rem; border: 0; background: #214f61; color: white; }
-pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; }
+/* REM "Tactical Blue" tokens (REM design.md). */
+:root {
+  --surface: #020710; --panel-top: #091937; --panel-bottom: #071025;
+  --border: rgb(74 133 207 / 45%); --primary: #64beff; --secondary: #9cb3d6;
+  --on-surface: #def1ff; --button: #8fdbff;
+  --headline: "Rajdhani", "Roboto Condensed", "Arial Narrow", sans-serif-condensed, sans-serif;
+  --body: "Chakra Petch", Roboto, sans-serif;
+}
+* { box-sizing: border-box; }
+body { background: var(--surface); color: var(--on-surface); font: 15px/1.45 var(--body); margin: 0; }
+main { display: grid; gap: 12px; margin: 0 auto; max-width: 40rem; padding: 16px; }
+h1 { font: 700 1.7rem/1.1 var(--headline); margin: 0; }
+.sub { color: var(--secondary); font-size: .85rem; margin: .2rem 0 0; }
+h2, summary { color: var(--primary); font: 700 .95rem var(--headline); letter-spacing: .12em; margin: 0 0 .4rem; text-transform: uppercase; }
+.panel { background: linear-gradient(180deg, var(--panel-top), var(--panel-bottom)); border: 1px solid var(--border); border-radius: 14px; padding: 14px; }
+.panel p { margin: .35rem 0; }
+.note { color: var(--secondary); font-size: .85rem; }
+#status { white-space: pre-line; }
+button { background: linear-gradient(180deg, rgb(10 35 72 / 88%), rgb(6 24 54 / 92%)); border: 1px solid var(--border); border-radius: 10px; box-shadow: inset 0 1px 0 rgb(209 244 255 / 10%), 0 8px 18px rgb(2 14 32 / 18%); color: var(--button); font: 700 1rem var(--headline); letter-spacing: .08em; min-height: 48px; padding: 0 14px; text-transform: uppercase; width: 100%; }
+button:active { background: linear-gradient(180deg, rgb(196 240 255 / 96%), rgb(118 212 255 / 94%)); border-color: rgb(224 248 255 / 86%); color: #042541; transform: translateY(1px) scale(.985); }
+summary { cursor: pointer; margin: 0; }
+pre { color: var(--secondary); font-size: .72rem; overflow-wrap: anywhere; white-space: pre-wrap; }

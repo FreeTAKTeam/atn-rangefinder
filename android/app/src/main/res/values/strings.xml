@@ -1,4 +1,5 @@
 <resources>
+    <string name="app_title">ATN Rangefinder</string>
     <string name="device_choice">%1$s (%2$s)</string>
     <string name="scan_all">Scan all Bluetooth devices, not only ATN ones</string>
     <string name="send_measurements">Send Binox measurements to REM as markers</string>

@@ -13,7 +13,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <queries><package android:name="${remHostPackage}" /></queries>
-    <application android:label="ATN Rangefinder" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:icon="@drawable/ic_atn"
+    <application android:label="ATN Rangefinder" android:theme="@android:style/Theme.Material.NoActionBar" android:icon="@drawable/ic_atn"
         android:allowBackup="false" android:fullBackupContent="false" android:dataExtractionRules="@xml/data_extraction_rules" android:usesCleartextTraffic="false">
         <!-- The real REM SDK checks host package AND certificate on every Binder call;
              signature permissions cannot span independently signed publisher APKs. -->

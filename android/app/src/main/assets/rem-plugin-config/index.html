@@ -1,3 +1,12 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ATN Rangefinder</title><link rel="stylesheet" href="config.css"></head>
-<body><main><h1>ATN Rangefinder</h1><p>Configure Bluetooth permissions, choose a device, confirm observer co-location and start capture in the plugin's Android settings.</p><p>Connections start read-only. While capture is started, each new eligible measurement becomes a shared REM marker; share a marker with this plugin from its details sheet to display it on the device. Map exchange requires REM plugin API 1.3 with the map capabilities granted, explicit device semantics and a fresh observer fix.</p><button id="open">Open Android settings</button><p id="status" role="status"></p><pre id="state"></pre></main><script src="config.js"></script></body></html>
+<body><main>
+<header><h1>ATN Rangefinder</h1><p class="sub">Binox 4K &middot; REM plugin</p></header>
+<section class="panel"><h2>Status</h2><p id="status" role="status">Waiting for the plugin&hellip;</p></section>
+<section class="panel"><h2>How it works</h2>
+<p>Open the plugin, tap <b>Scan for Binox</b>, pick your Binox and answer <b>Is this phone with the binocular?</b></p>
+<p>Each measurement then becomes a REM marker, and REM markers within the Binox's range appear on it automatically, in NATO colours.</p>
+<p class="note">Allow ATN Rangefinder's map permissions above, including "Read all map markers near this device".</p></section>
+<button id="open">Open ATN Rangefinder</button>
+<details class="panel"><summary>Technical details</summary><pre id="state"></pre></details>
+</main><script src="config.js"></script></body></html>

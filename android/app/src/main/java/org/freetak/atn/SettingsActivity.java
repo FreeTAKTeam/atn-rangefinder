@@ -83,36 +83,52 @@ public final class SettingsActivity extends Activity {
         super.onCreate(state);
         preferences = new PluginPreferences(this);
         setTitle("ATN Rangefinder");
+        getWindow().getDecorView().setBackgroundColor(RemStyle.SURFACE);
         ScrollView scroll = new ScrollView(this);
+        scroll.setBackgroundColor(RemStyle.SURFACE);
         layout = new LinearLayout(this); layout.setOrientation(LinearLayout.VERTICAL);
-        // Extra bottom space keeps the last button clear of Android's gesture bar.
-        layout.setPadding(24, 24, 24, 240);
+        int gutter = RemStyle.dp(this, 16);
+        layout.setPadding(gutter, gutter, gutter, RemStyle.dp(this, 32));
         scroll.addView(layout); setContentView(scroll);
-        text(layout, "ATN Rangefinder " + BuildConfig.VERSION_NAME, 24);
-        status = text(layout, "", 18);
+        // Android 15 draws edge to edge: keep content clear of the status and gesture bars.
+        scroll.setOnApplyWindowInsetsListener((view, insets) -> {
+            view.setPadding(0, insets.getSystemWindowInsetTop(), 0, insets.getSystemWindowInsetBottom());
+            return insets;
+        });
 
-        text(layout, "Binox", 20);
-        alias = text(layout, preferences.alias(), 16);
-        button(layout, "Scan for Binox", this::startScan);
-        discovered = new LinearLayout(this); discovered.setOrientation(LinearLayout.VERTICAL); layout.addView(discovered);
-        button(layout, "Connect", this::askAndConnect);
-        button(layout, "Disconnect", () -> AtnPluginService.ui(AtnPluginService::disconnectFromUi));
-        text(layout, "Do not pair the Binox in Android's Bluetooth settings; this screen connects to it directly.", 14);
+        TextView title = new TextView(this); title.setText(R.string.app_title); RemStyle.title(title); layout.addView(title);
+        text(layout, "Binox 4K \u00b7 REM plugin " + BuildConfig.VERSION_NAME, 14);
 
+        LinearLayout statusPanel = panel(layout);
+        text(statusPanel, "Status", 20);
+        status = text(statusPanel, "", 16);
+
+        LinearLayout binox = panel(layout);
+        text(binox, "Binox", 20);
+        alias = text(binox, preferences.alias(), 18);
+        button(binox, "Scan for Binox", this::startScan, false);
+        discovered = new LinearLayout(this); discovered.setOrientation(LinearLayout.VERTICAL); binox.addView(discovered);
+        button(binox, "Connect", this::askAndConnect, false);
+        button(binox, "Disconnect", () -> AtnPluginService.ui(AtnPluginService::disconnectFromUi), true);
+        text(binox, "Do not pair the Binox in Android's Bluetooth settings; this screen connects to it directly.", 14);
+
+        LinearLayout measurements = panel(layout);
+        text(measurements, "Measurements", 20);
         CheckBox send = new CheckBox(this);
         send.setText(R.string.send_measurements);
+        RemStyle.checkbox(send);
         send.setChecked(preferences.sendMeasurements());
         send.setOnCheckedChangeListener((view, checked) -> AtnPluginService.ui(service -> service.setSendMeasurementsFromUi(checked)));
-        layout.addView(send);
+        measurements.addView(send);
 
-        text(layout, "On the Binox", 20);
-        text(layout, "REM markers within the Binox's range appear on it automatically, nearest first. Once, in REM: Settings → Plugins → ATN Rangefinder → allow \"Read all map markers near this device\" (REM 1.5.2 or later).", 14);
-        sessions = text(layout, "", 14);
-        button(layout, "Stop showing REM markers", () -> AtnPluginService.ui(service -> service.stopSyncFromUi("")));
+        LinearLayout display = panel(layout);
+        text(display, "On the Binox", 20);
+        text(display, "REM markers within the Binox's range appear on it automatically, nearest first, in NATO colours. Once, in REM: Settings \u2192 Plugins \u2192 ATN Rangefinder \u2192 allow \"Read all map markers near this device\".", 14);
+        sessions = text(display, "", 14);
+        button(display, "Stop showing REM markers", () -> AtnPluginService.ui(service -> service.stopSyncFromUi("")), true);
 
-        Button toggle = button(layout, "Show advanced", null);
-        advanced = new LinearLayout(this); advanced.setOrientation(LinearLayout.VERTICAL); advanced.setVisibility(View.GONE);
-        layout.addView(advanced);
+        Button toggle = button(layout, "Show advanced", null, false);
+        advanced = panel(layout); advanced.setVisibility(View.GONE);
         toggle.setOnClickListener(view -> {
             boolean show = advanced.getVisibility() != View.VISIBLE;
             advanced.setVisibility(show ? View.VISIBLE : View.GONE);
@@ -121,13 +137,26 @@ public final class SettingsActivity extends Activity {
         buildAdvanced();
     }
 
+    /** A REM-style card holding one section. */
+    private LinearLayout panel(LinearLayout parent) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(RemStyle.panel(this));
+        int padding = RemStyle.dp(this, 14);
+        card.setPadding(padding, padding, padding, padding);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.topMargin = RemStyle.dp(this, 12);
+        parent.addView(card, params);
+        return card;
+    }
+
     /** The one question: is this phone with the binocular? Its position stands in for the Binox's. */
     private void askAndConnect() {
         if (AtnPluginService.statusLine().startsWith("REM: plugin not running")) {
             message("Enable ATN Rangefinder in REM's plugin settings and start the REM node first");
             return;
         }
-        new AlertDialog.Builder(this)
+        dialog()
             .setMessage("Is this phone with the binocular?\n\nThe phone's GPS position is used to place measured targets and to aim REM markers on the Binox.")
             .setPositiveButton("Yes", (dialog, which) -> connectWithBinocular())
             .setNegativeButton("No", (dialog, which) -> AtnPluginService.ui(service -> service.connectFromUi(false)))
@@ -154,7 +183,7 @@ public final class SettingsActivity extends Activity {
             catch (JSONException error) { message(error.getMessage()); }
         });
         button(advanced, "Reset to Binox 4K defaults", () -> { overrides.setText("{}"); saveOverrides(); });
-        scanAll = new CheckBox(this); scanAll.setText(R.string.scan_all); advanced.addView(scanAll);
+        scanAll = new CheckBox(this); scanAll.setText(R.string.scan_all); RemStyle.checkbox(scanAll); advanced.addView(scanAll);
         button(advanced, "Grant Bluetooth permissions", this::requestBluetoothPermissions);
 
         text(advanced, "REM session ID (for stopping one session, icons and display confirmation)", 16);
@@ -321,6 +350,7 @@ public final class SettingsActivity extends Activity {
             String name = device.getName() == null ? "ATN device" : device.getName();
             Button choice = new Button(this);
             choice.setText(getString(R.string.device_choice, name, address.substring(Math.max(0, address.length() - 5))));
+            RemStyle.button(choice, false);
             choice.setOnClickListener(view -> {
                 stopScan();
                 AtnPluginService.ui(AtnPluginService::disconnectFromUi);
@@ -329,7 +359,9 @@ public final class SettingsActivity extends Activity {
                 discovered.removeAllViews();
                 askAndConnect();
             });
-            discovered.addView(choice);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            params.topMargin = RemStyle.dp(this, 8);
+            discovered.addView(choice, params);
         } catch (SecurityException error) { stopScan(); message("Bluetooth permission revoked"); }
     }
     @SuppressLint("MissingPermission") private void stopScan() {
@@ -338,22 +370,43 @@ public final class SettingsActivity extends Activity {
         if (previous != null) try { previous.stopScan(scanCallback); } catch (SecurityException ignored) { }
         if (alias != null && getString(R.string.scanning).contentEquals(alias.getText())) alias.setText(preferences.alias());
     }
+    /** Size 20 is a section heading; 16 and up primary text; smaller is secondary text. */
     private TextView text(LinearLayout parent, String value, int size) {
-        TextView text = new TextView(this); text.setText(value); text.setTextSize(size); text.setTextIsSelectable(true);
-        parent.addView(text); return text;
+        TextView text = new TextView(this); text.setText(value); text.setTextIsSelectable(true);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        if (size >= 20) {
+            RemStyle.heading(text);
+            // Selectable text ignores all-caps, so uppercase headings directly.
+            text.setText(value.toUpperCase(java.util.Locale.ROOT));
+            params.topMargin = parent.getChildCount() == 0 ? 0 : RemStyle.dp(this, 12);
+            params.bottomMargin = RemStyle.dp(this, 4);
+        } else {
+            text.setTextSize(size);
+            RemStyle.body(text, size < 16);
+            params.topMargin = RemStyle.dp(this, 4);
+        }
+        parent.addView(text, params); return text;
     }
     private EditText editor(LinearLayout parent, String value, int lines) {
         EditText editor = new EditText(this); editor.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
         editor.setText(value); editor.setMinLines(lines); editor.setMaxLines(lines + 3);
-        parent.addView(editor, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        RemStyle.input(editor);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.topMargin = RemStyle.dp(this, 6);
+        parent.addView(editor, params);
         return editor;
     }
-    private Button button(LinearLayout parent, String label, Runnable action) {
+    private Button button(LinearLayout parent, String label, Runnable action) { return button(parent, label, action, false); }
+    private Button button(LinearLayout parent, String label, Runnable action, boolean danger) {
         Button button = new Button(this); button.setText(label);
+        RemStyle.button(button, danger);
         if (action != null) button.setOnClickListener(view -> action.run());
-        parent.addView(button); return button;
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.topMargin = RemStyle.dp(this, 8);
+        parent.addView(button, params); return button;
     }
-    private void message(String value) { new AlertDialog.Builder(this).setMessage(value).setPositiveButton(android.R.string.ok, null).show(); }
+    private AlertDialog.Builder dialog() { return new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert); }
+    private void message(String value) { dialog().setMessage(value).setPositiveButton(android.R.string.ok, null).show(); }
     @Override protected void onResume() { super.onResume(); handler.post(refresh); }
     @Override protected void onPause() { stopScan(); handler.removeCallbacks(refresh); super.onPause(); }
     @Override protected void onDestroy() { stopScan(); handler.removeCallbacksAndMessages(null); super.onDestroy(); }
