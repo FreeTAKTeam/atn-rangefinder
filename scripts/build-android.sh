@@ -43,7 +43,10 @@ else
         [[ -x "$atn_toolchain/$atn_clang" ]] || { printf '%s\n' 'NDK compiler unavailable.' >&2; exit 1; }
         atn_linker_var="CARGO_TARGET_${atn_target^^}_LINKER"
         atn_linker_var="${atn_linker_var//-/_}"
+        # Android 15+ devices may use 16 KB pages; align LOAD segments for them.
+        atn_rustflags_var="${atn_linker_var%_LINKER}_RUSTFLAGS"
         env "$atn_linker_var=$atn_toolchain/$atn_clang" \
+            "$atn_rustflags_var=-C link-arg=-Wl,-z,max-page-size=16384" \
             cargo build --manifest-path "$atn_root/Cargo.toml" --locked -p atn-adapter \
             --target "$atn_target" "${atn_cargo_args[@]}" "${atn_offline[@]}"
         atn_target_dir="${CARGO_TARGET_DIR:-$atn_root/target}"

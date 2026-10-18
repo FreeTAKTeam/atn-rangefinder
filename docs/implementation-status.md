@@ -223,3 +223,20 @@ built with the synthetic all-zero host fingerprint, which cannot authenticate a 
 Status after Stage 4: **implemented but unproven**. Hardware qualification is deferred by the
 user; no gate in `docs/goals/atn-rem-plugin/qualification.md` has been performed, and no real REM
 host, RNode, ATN device or goTenna was exercised.
+
+## 16 KB page alignment of the native library (2026-10-18)
+
+Installing the debug APK on an Android 17 phone showed the platform warning "This app isn't 16 KB
+compatible ... `lib/arm64-v8a/libatn_adapter.so`: LOAD segment not aligned". The library still
+loaded there because that phone uses 4 KB pages, but it would fail on 16 KB-page devices.
+`scripts/build-android.sh` now links the Android targets with
+`-C link-arg=-Wl,-z,max-page-size=16384` (target-scoped `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`, next to
+the NDK linker; host builds are unchanged).
+
+Checks on 2026-10-18: `llvm-readelf -lW` (NDK 27.0.12077973) on the arm64-v8a
+`libatn_adapter.so` shows all four LOAD segments with `Align 0x4000` (previously `0x1000`);
+`zipalign -c -P 16 -v 4` on the debug APK reports `lib/arm64-v8a/libatn_adapter.so (OK)` and
+"Verification successful". `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (105 tests),
+`bash scripts/test-jni.sh` (PASS) and `scripts/build-android.sh --offline` (4 JVM tests, lint with
+no issues, synthetic host fingerprint) passed. Not checked: loading on a 16 KB-page device.
