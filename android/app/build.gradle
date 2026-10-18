@@ -21,7 +21,7 @@ if (!hostFingerprints.split(',').every { it ==~ /[0-9a-f]{64}/ }) throw new Grad
 def nativeLibs = project.findProperty('nativeLibsDir')?.toString()
 // Single source of the plugin version: bump it for every build handed out. It feeds the APK
 // version and the manifest's rem.plugin.version shown in REM.
-def pluginVersion = '0.2.0'
+def pluginVersion = '0.4.1'
 def (versionMajor, versionMinor, versionPatch) = pluginVersion.tokenize('.').collect { it as int }
 
 android {

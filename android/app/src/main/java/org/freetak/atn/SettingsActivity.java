@@ -46,6 +46,7 @@ import org.json.JSONObject;
 public final class SettingsActivity extends Activity {
     private static final int PERMISSIONS = 71;
     private static final int ICON = 72;
+    private static final int LOCATION = 73;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Map<String, BluetoothDevice> devices = new LinkedHashMap<>();
     private PluginPreferences preferences;
@@ -83,7 +84,9 @@ public final class SettingsActivity extends Activity {
         preferences = new PluginPreferences(this);
         setTitle("ATN Rangefinder");
         ScrollView scroll = new ScrollView(this);
-        layout = new LinearLayout(this); layout.setOrientation(LinearLayout.VERTICAL); layout.setPadding(24, 24, 24, 24);
+        layout = new LinearLayout(this); layout.setOrientation(LinearLayout.VERTICAL);
+        // Extra bottom space keeps the last button clear of Android's gesture bar.
+        layout.setPadding(24, 24, 24, 240);
         scroll.addView(layout); setContentView(scroll);
         text(layout, "ATN Rangefinder " + BuildConfig.VERSION_NAME, 24);
         status = text(layout, "", 18);
@@ -103,7 +106,7 @@ public final class SettingsActivity extends Activity {
         layout.addView(send);
 
         text(layout, "On the Binox", 20);
-        text(layout, "To show a REM marker on the Binox, open the marker in REM and choose Share with ATN Rangefinder.", 14);
+        text(layout, "REM markers within the Binox's range appear on it automatically, nearest first. Once, in REM: Settings → Plugins → ATN Rangefinder → allow \"Read all map markers near this device\" (REM 1.5.2 or later).", 14);
         sessions = text(layout, "", 14);
         button(layout, "Stop showing REM markers", () -> AtnPluginService.ui(service -> service.stopSyncFromUi("")));
 
@@ -125,10 +128,19 @@ public final class SettingsActivity extends Activity {
             return;
         }
         new AlertDialog.Builder(this)
-            .setMessage("Is this phone with the binocular?\n\nREM uses the phone's position to place measured targets and to aim shared markers on the Binox.")
-            .setPositiveButton("Yes", (dialog, which) -> AtnPluginService.ui(service -> service.connectFromUi(true)))
+            .setMessage("Is this phone with the binocular?\n\nThe phone's GPS position is used to place measured targets and to aim REM markers on the Binox.")
+            .setPositiveButton("Yes", (dialog, which) -> connectWithBinocular())
             .setNegativeButton("No", (dialog, which) -> AtnPluginService.ui(service -> service.connectFromUi(false)))
             .show();
+    }
+
+    /** The phone's GPS stands in for the Binox's position, so ask for location once. */
+    private void connectWithBinocular() {
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[] {Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION}, LOCATION);
+            return;
+        }
+        AtnPluginService.ui(service -> service.connectFromUi(true));
     }
 
     private void buildAdvanced() {
@@ -234,6 +246,11 @@ public final class SettingsActivity extends Activity {
     }
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode == LOCATION) {
+            // Without it the plugin falls back to REM's position.
+            AtnPluginService.ui(service -> service.connectFromUi(true));
+            return;
+        }
         if (requestCode != PERMISSIONS) return;
         if (hasScanPermission()) startScan();
         else message("Bluetooth permission was denied. Allow Nearby devices for ATN Rangefinder in Android settings");

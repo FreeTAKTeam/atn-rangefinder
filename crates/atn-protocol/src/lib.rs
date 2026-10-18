@@ -6,12 +6,14 @@
 
 mod icon;
 mod png;
+mod png_encode;
 
 pub use icon::{
     IconFragment, IconReassembler, ReassemblyLimits, ReassemblyProgress, fragment_payload,
     fragment_png,
 };
 pub use png::{PngInfo, PngLimits, validate_png};
+pub use png_encode::encode_rgba_png;
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

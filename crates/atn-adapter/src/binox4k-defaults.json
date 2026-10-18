@@ -70,17 +70,18 @@
     }
   },
   "eligibility": {
-    "maxObserverAgeMs": 30000,
+    "maxObserverAgeMs": 600000,
     "maxObservationAgeMs": 5000,
     "maxDeclinationAgeMs": 1000,
-    "maxHorizontalAccuracyM": 25.0
+    "maxHorizontalAccuracyM": 50.0
   },
   "pitchPolicy": "horizontalDisplay",
-  "markerType": 0,
+  "markerType": 1,
   "color": 4,
-  "queueCapacity": 8,
+  "sendIcons": true,
+  "queueCapacity": 40,
   "maxQueuedBytes": 65536,
-  "queueTtlMs": 5000,
+  "queueTtlMs": 60000,
   "operationTimeoutMs": 3000,
   "createRetryDelayMs": 500,
   "reconcileIntervalMs": 5000,

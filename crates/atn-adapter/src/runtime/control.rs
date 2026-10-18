@@ -232,6 +232,9 @@ impl Adapter {
                 self.end_capture("new BLE connection", actions);
                 self.end_all_displays("new BLE connection", true, now, actions);
                 self.in_flight = None;
+                // A new connection starts showing nearby REM markers again.
+                self.nearby_paused = false;
+                self.last_nearby_ms = None;
                 self.observer = None;
                 self.colocation = None;
                 self.drop_observation_requests("connection changed before host answered");
@@ -378,6 +381,7 @@ impl Adapter {
                     );
                 } else {
                     self.end_all_displays("operator stopped display session", true, now, actions);
+                    self.nearby_paused = true;
                     self.pending.retain(|_, p| {
                         !matches!(p.purpose, Purpose::Observer | Purpose::SessionObjects(_))
                     });
@@ -443,6 +447,8 @@ impl Adapter {
                 Purpose::Notify => {
                     actions.push(json!({"kind":"status","message":"REM notification timed out"}));
                 }
+                // The next interval asks again.
+                Purpose::Nearby => {}
                 // The next reconciliation lists again; nothing ends meanwhile.
                 Purpose::SessionList(_) => {
                     actions.push(json!({"kind":"status","message":"REM session list timed out"}));

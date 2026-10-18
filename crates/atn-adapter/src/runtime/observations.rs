@@ -75,14 +75,24 @@ impl Adapter {
                     create: None,
                 });
                 if capturing {
-                    self.request(
-                        Purpose::Measurement(id),
-                        OP_OBSERVER_SNAPSHOT,
-                        json!({}),
-                        now,
-                        actions,
-                    )?;
+                    if self.observer_valid(now).is_ok() {
+                        // A fresh fix (the phone's own GPS) places it at once.
+                        self.create_marker(id, now, actions)?;
+                    } else {
+                        self.request(
+                            Purpose::Measurement(id),
+                            OP_OBSERVER_SNAPSHOT,
+                            json!({}),
+                            now,
+                            actions,
+                        )?;
+                    }
                 }
+                let host = self
+                    .observations
+                    .iter()
+                    .find(|o| o.id == id)
+                    .map_or(host, |o| o.host.clone());
                 Ok(json!({"id":id,"observation":record,"host":host}))
             }
             InboundFrame::Reply(reply) => self.route_reply(reply, now, actions),

@@ -1,5 +1,6 @@
 mod control;
 mod host;
+mod nearby;
 mod observations;
 mod sessions;
 use crate::{AdapterConfig, RemMapObject};
@@ -39,6 +40,7 @@ pub const OP_SESSION_LIST: &str = "map.session.list";
 pub const OP_SESSION_OBJECTS: &str = "map.session.objects.get";
 pub const OP_SESSION_STOP: &str = "map.session.stop";
 pub const OP_NOTIFY: &str = "notifications.raise";
+pub const OP_MARKERS_NEARBY: &str = "map.markers.nearby";
 
 #[derive(Clone)]
 enum Purpose {
@@ -55,6 +57,8 @@ enum Purpose {
     SessionStop(String),
     /// Operator-visible rejection reason; best effort, never cancels work.
     Notify,
+    /// REM markers around this device (`mapNearbyRead`), shown automatically.
+    Nearby,
 }
 struct Pending {
     purpose: Purpose,
@@ -148,6 +152,10 @@ struct Display {
     snapshot_at_ms: u64,
     /// An event arrived since the last authoritative snapshot.
     dirty: bool,
+    /// The automatic set of nearby REM markers, not a REM session.
+    nearby: bool,
+    /// Icon affiliation last queued per object, so each icon is sent once.
+    icons: BTreeMap<String, crate::icons::Affiliation>,
 }
 
 /// A slot whose authorization ended. The device still shows whatever was
@@ -183,6 +191,12 @@ pub struct Adapter {
     /// Connection-scoped; never persisted.
     colocation: Option<String>,
     observer: Option<ObserverFix>,
+    /// After REM answered with an ineligible fix, ask again no sooner than this.
+    observer_retry_after_ms: Option<u64>,
+    /// Why REM's position for this phone cannot be used, reported once.
+    observer_problem: Option<String>,
+    /// Where the phone was when the display was last re-aimed.
+    display_origin: Option<(f64, f64)>,
     displays: Vec<Display>,
     ended_sessions: VecDeque<SessionSnapshot>,
     released_slots: VecDeque<ReleasedSlot>,
@@ -190,6 +204,12 @@ pub struct Adapter {
     /// Round-robin cursor over `displays` for starting the next operation.
     next_writer: usize,
     last_reconcile_ms: Option<u64>,
+    last_nearby_ms: Option<u64>,
+    nearby_sequence: u64,
+    /// "Stop showing REM markers" pauses the automatic set until reconnect.
+    nearby_paused: bool,
+    /// Last automatic-set problem reported, so it is shown once.
+    nearby_problem: Option<String>,
     terminal_sessions: VecDeque<String>,
     observations: VecDeque<StoredObservation>,
     pending: BTreeMap<String, Pending>,
@@ -220,12 +240,19 @@ impl Adapter {
             connection: None,
             colocation: None,
             observer: None,
+            observer_retry_after_ms: None,
+            observer_problem: None,
+            display_origin: None,
             displays: Vec::new(),
             ended_sessions: VecDeque::new(),
             released_slots: VecDeque::new(),
             in_flight: None,
             next_writer: 0,
             last_reconcile_ms: None,
+            last_nearby_ms: None,
+            nearby_sequence: 0,
+            nearby_paused: false,
+            nearby_problem: None,
             terminal_sessions: VecDeque::new(),
             observations: VecDeque::new(),
             pending: BTreeMap::new(),
@@ -289,6 +316,7 @@ impl Adapter {
             "confirmColocation" | "clearColocation" => self.colocation(cmd, v, now, actions),
             "startCapture" | "stopCapture" => self.capture_control(cmd, now, actions),
             "notification" => self.notification(v, now, actions),
+            "phoneFix" => self.phone_fix(v, now, actions),
             "hostResponse" => self.host_response(v, now, actions),
             "hostEvent" => self.host_event(v, now, actions),
             "stopSync" | "tick" => self.session_control(cmd, v, now, actions),
@@ -384,7 +412,13 @@ impl Adapter {
     /// Requests a fresh REM observer snapshot for the display session unless one
     /// is already outstanding.
     fn refresh_observer(&mut self, now: u64, actions: &mut Vec<Value>) -> Result<(), String> {
-        if self.pending_purpose(|p| matches!(p, Purpose::Observer)) {
+        // After an unusable answer, wait for the next interval instead of
+        // asking REM again in a tight loop.
+        if self.pending_purpose(|p| matches!(p, Purpose::Observer))
+            || self
+                .observer_retry_after_ms
+                .is_some_and(|after| now < after)
+        {
             return Ok(());
         }
         self.request(
@@ -414,7 +448,7 @@ impl Adapter {
             "hostStarted":self.host_started,"apiMinor":self.api_minor,"requiredApiMinor":REQUIRED_API_MINOR,
             "hostReady":self.host_ready,"colocationConfirmed":self.colocation.is_some(),
             "capture":{"active":self.capture.is_some(),"session":self.capture,"lastEnded":self.capture_ended},
-            "observerFresh":self.observer.is_some(),
+            "observerFresh":self.observer.is_some(),"observerProblem":self.observer_problem,
             "maxSessions":MAX_DISPLAY_SESSIONS,"freeSlots":self.free_slots(),
             "sessions":self.displays.iter().map(|d| d.sync.snapshot()).collect::<Vec<_>>(),
             "endedSessions":self.ended_sessions,"releasedSlots":self.released_slots,

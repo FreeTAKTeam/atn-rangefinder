@@ -32,6 +32,7 @@ RCH directly. Both checkouts were inspected without editing them.
 | `map.session.list` | `{}` | `{items:[session]}` | after the symbol check, on co-location confirmation and every `reconcileIntervalMs` on the lifecycle tick; recovers dropped `started` events and detects sessions that ended without an event |
 | `map.session.objects.get` | `sessionId` | `{session, objects}` | authoritative snapshot of a newly listed session, or of a listed session whose snapshot is older than `reconcileIntervalMs` or that received an event; omitted objects leave the selection |
 | `map.session.stop` | `sessionId` | `{stopped:true}` | rejecting a session the adapter cannot serve; ending a session on disconnect, stop, profile change or local failure |
+| `map.markers.nearby` (REM 1.5.2, capability `mapNearbyRead`) | `radiusM`, `limit` | `{available, radiusM, items}` nearest first with `distanceM`, `notes` omitted | every reconciliation interval while connected and co-located; the nearest markers that fit the free slots form the automatic display set; a denial is reported once and changes nothing else |
 | `notifications.raise` | `{title, body}` | `{accepted:true}` | one short operator-visible reason per rejected session; best effort (REM shows it as an Android notification) |
 
 Errors are typed: `PermissionDenied` (minor too old, capability not declared/granted, plugin

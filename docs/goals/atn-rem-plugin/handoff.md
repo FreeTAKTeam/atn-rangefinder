@@ -67,6 +67,18 @@ Decisions taken in Stage 3:
 - `setIcon`/`confirmDisplay` now require `sessionId`; refusing an unknown session/object answers
   `accepted:false` without ending sessions (previously any refusal ended the single session).
 
+Decisions taken for automatic REM markers on the Binox (2026-10-18, plugin 0.3.0, REM 1.5.2):
+
+- The operator wants REM markers on the Binox without sharing each one. REM 1.5.1 lets plugins
+  read only their own or explicitly shared markers, so REM gained an operator-granted capability,
+  `mapNearbyRead`, and `map.markers.nearby` (markers within a radius of REM's own fix, nearest
+  first, at most 50, `notes` omitted). This was decided with the operator; REM was changed in its
+  own repository.
+- The plugin polls it on the reconciliation interval within `semantics.maxDistanceM`. The nearest
+  markers that fit the free slots form one automatic display set beside any REM shares. Same
+  membership only updates positions; changed membership replaces the set. **Stop showing REM
+  markers** pauses it until the next connect. REM's session list never ends it.
+
 Decisions taken in the operator simplification (2026-10-18):
 
 - The user's rule for all projects is convention over configuration, and the main target is the

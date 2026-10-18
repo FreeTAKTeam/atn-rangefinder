@@ -275,3 +275,37 @@ Plugin version 0.2.0 (2026-10-18): the version now has a single source, `pluginV
 minor·100 + patch = 200) and the manifest's `rem.plugin.version`. The settings screen shows it in
 its title. It must be bumped for every build that is handed out; earlier builds all reported
 0.1.0. Installed on the Pixel 7 as 0.2.0 / 200 (lint clean, 4 JVM tests).
+
+## Field iteration on the Pixel 7 (2026-10-18, plugin 0.3.0–0.4.1, REM 1.5.2–1.5.3)
+
+Tested with the operator's Binox 4K, a Pixel 7 (GrapheneOS) and a second REM device (Poco). On the
+device, Binox measurements became REM markers that replicated to the peer, and REM markers
+appeared on the Binox radar in NATO colours with icons.
+
+- **Automatic REM markers on the Binox (0.3.0, REM 1.5.2):** REM's new capability `mapNearbyRead`
+  and `map.markers.nearby` (REM repository, separate branch) feed an automatic display set of the
+  nearest markers within `maxDistanceM` that fit the free slots. It is refreshed each
+  reconciliation interval and runs beside REM shares.
+- **Phone position (0.3.1–0.3.2):** REM's position is only refreshed at its telemetry interval and
+  not in the background, and REM keeps the GPS on for only 15 s per attempt, which never got a
+  first fix on GrapheneOS. The plugin now keeps the phone GPS running while connected (native
+  `phoneFix`, foreground-service type `location`), with REM's position as fallback. Defaults
+  accept fixes up to 10 min old within 50 m. A rejected position is reported once and asked
+  again only after the interval, which removes an earlier busy loop.
+- **Colours and icons (0.4.0–0.4.1):** NATO affiliation colours from REM symbols. Generated
+  40×40 RGBA icons use a new PNG encoder in `atn-protocol` (`encode_rgba_png`, validated by
+  `validate_png`) and are sent once per marker and on symbol change (`sendIcons`). `markerType`
+  defaults to 1 because the radar dots were coloured only with type 1 (operator observation).
+  Larger queue defaults (`queueCapacity` 40, `queueTtlMs` 60 000) cover a position and an icon for
+  16 markers.
+- **Permissions:** `PermissionDenied` on marker creation or the observer snapshot now only stops
+  measurements going to REM and names the REM grant; displays and REM stay up. REM 1.5.3 shows
+  plugin permissions in one readable column with technical details collapsed. Before that, two
+  grants were off-screen and could not be enabled.
+
+Checks on 2026-10-18: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D
+warnings`, `cargo test --workspace` (120 tests) and `bash scripts/test-jni.sh` (PASS) passed;
+`scripts/build-android.sh --offline` passed (4 JVM tests, lint with no issues). Plugin 0.4.1 was
+built with REM's real host certificate fingerprint (not committed) and installed on the Pixel.
+REM 1.5.3 was built signed with the operator's release key and installed as an update.
+Still to confirm on the device: north reference, pitch sign, range type and display slots.

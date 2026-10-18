@@ -1,4 +1,17 @@
-use super::{Adapter, HostOutcome, ObserverFix, Purpose, RemMapObject, Value, decode, json, text};
+use super::{
+    Adapter, HostOutcome, ObserverFix, Purpose, RemMapObject, Value, decode, integer, json, text,
+};
+
+/// Phone movement after which the Binox display is re-aimed.
+const DISPLAY_REAIM_M: f64 = 10.0;
+
+/// Equirectangular distance; adequate for a 10 m movement threshold.
+fn approx_distance_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    const EARTH_MEAN_RADIUS_M: f64 = 6_371_008.8;
+    let x = (lon2 - lon1).to_radians() * f64::midpoint(lat1, lat2).to_radians().cos();
+    let y = (lat2 - lat1).to_radians();
+    EARTH_MEAN_RADIUS_M * x.hypot(y)
+}
 use atn_domain::{GeographicPosition, ObserverSource};
 
 impl Adapter {
@@ -74,15 +87,7 @@ impl Adapter {
                 self.host_ready = true;
                 self.request_session_list(now, actions)?;
             }
-            Purpose::Observer => match self.observer_from_snapshot(result) {
-                Ok(fix) => {
-                    self.accept_observer(fix, now)?;
-                    self.refresh_selected(None, now, actions)?;
-                }
-                Err(reason) => {
-                    actions.push(json!({"kind":"status","message":format!("observer fix ineligible: {reason}")}));
-                }
-            },
+            Purpose::Observer => self.observer_answer(result, now, actions)?,
             Purpose::Measurement(id) => {
                 let fix = match self.observer_from_snapshot(result) {
                     Ok(fix) => fix,
@@ -140,6 +145,7 @@ impl Adapter {
                 let objects: Vec<RemMapObject> = decode(result, "objects")?;
                 self.apply_objects(&expected, objects, now, actions)?;
             }
+            Purpose::Nearby => self.nearby_result(result, now, actions)?,
             Purpose::SessionStop(_) | Purpose::Notify => {}
         }
         Ok(())
@@ -188,6 +194,10 @@ impl Adapter {
             }
             Purpose::SessionStop(_) => return Ok(self.status()),
             // Notifications are best effort, even when REM denies the capability.
+            Purpose::Nearby => {
+                self.nearby_failed(code, message, actions);
+                return Ok(self.status());
+            }
             Purpose::Notify => {
                 actions.push(json!({"kind":"status","message":format!("REM notification not shown: {code} {message}")}));
                 return Ok(self.status());
@@ -218,6 +228,20 @@ impl Adapter {
             _ => {}
         }
         if code == "PermissionDenied" {
+            // A missing grant for marker creation or the phone position only
+            // stops measurements going to REM; displays and the host stay up.
+            if let Some(grant) = match purpose {
+                Purpose::Create(_) => Some("Add and edit its own map markers"),
+                Purpose::Measurement(_) => Some("Read this device's location"),
+                _ => None,
+            } {
+                let message = format!(
+                    "Measurements stay on this phone: allow \"{grant}\" for ATN Rangefinder in REM's plugin settings"
+                );
+                self.end_capture(&message, actions);
+                actions.push(json!({"kind":"status","message":message}));
+                return Ok(self.status());
+            }
             self.end_capture("map capability revoked (PermissionDenied)", actions);
             self.host_ready = false;
         }
@@ -313,6 +337,118 @@ impl Adapter {
             source,
             evidence_id,
         })
+    }
+
+    /// REM's answer to an observer refresh: use it, or report why not and
+    /// wait for the next interval.
+    fn observer_answer(
+        &mut self,
+        result: &Value,
+        now: u64,
+        actions: &mut Vec<Value>,
+    ) -> Result<(), String> {
+        let problem = match self.observer_from_snapshot(result) {
+            Ok(fix) => {
+                let description = self.describe_fix(&fix, now);
+                if self.accept_observer(fix, now)? || self.observer_valid(now).is_ok() {
+                    // An older REM fix next to a fresh phone fix is no problem.
+                    None
+                } else {
+                    Some(description)
+                }
+            }
+            Err(reason) => Some(reason),
+        };
+        match problem {
+            None => {
+                self.observer_retry_after_ms = None;
+                self.observer_problem = None;
+                self.refresh_selected(None, now, actions)?;
+            }
+            Some(problem) => {
+                let interval = self
+                    .config
+                    .as_ref()
+                    .map_or(5000, |c| c.reconcile_interval_ms);
+                self.observer_retry_after_ms = Some(now.saturating_add(interval));
+                self.observer_report(&problem, actions);
+            }
+        }
+        Ok(())
+    }
+
+    /// A fix from this phone's own GPS, which the platform keeps running
+    /// while the Binox is connected. It is the same device REM reports as the
+    /// observer, only fresher; the same age and accuracy limits apply, and an
+    /// older fix never replaces a newer one. The display is re-aimed only after
+    /// the phone moved more than [`DISPLAY_REAIM_M`], not on GPS jitter.
+    pub(super) fn phone_fix(
+        &mut self,
+        v: &Value,
+        now: u64,
+        actions: &mut Vec<Value>,
+    ) -> Result<Value, String> {
+        let number = |key: &str| {
+            v.get(key)
+                .and_then(Value::as_f64)
+                .ok_or_else(|| format!("phone fix {key} required"))
+        };
+        let (lat, lon, accuracy) = (number("lat")?, number("lon")?, number("accuracyM")?);
+        let captured_at_ms = integer(v, "fixTimeMs")?;
+        let (source, evidence_id) = match &self.colocation {
+            Some(evidence) => (ObserverSource::VerifiedColocated, evidence.clone()),
+            None => (ObserverSource::Unverified, String::new()),
+        };
+        let fix = ObserverFix {
+            position: GeographicPosition {
+                latitude: lat,
+                longitude: lon,
+                altitude_m: None,
+            },
+            captured_at_ms,
+            horizontal_accuracy_m: accuracy,
+            source,
+            evidence_id,
+        };
+        let description = self
+            .describe_fix(&fix, now)
+            .replace("REM's", "The phone GPS");
+        if !self.accept_observer(fix, now)? {
+            if self.observer_valid(now).is_err() {
+                self.observer_report(&description, actions);
+            }
+            return Ok(json!({"accepted":false}));
+        }
+        self.observer_retry_after_ms = None;
+        self.observer_problem = None;
+        let moved = self.display_origin.is_none_or(|(old_lat, old_lon)| {
+            approx_distance_m(old_lat, old_lon, lat, lon) > DISPLAY_REAIM_M
+        });
+        if moved {
+            self.display_origin = Some((lat, lon));
+            self.refresh_selected(None, now, actions)?;
+        }
+        Ok(json!({"accepted":true}))
+    }
+
+    /// Plain-language reason a fix REM sent cannot be used.
+    fn describe_fix(&self, fix: &ObserverFix, now: u64) -> String {
+        let limits = self.config.as_ref().map(|c| &c.eligibility);
+        format!(
+            "REM's position for this phone is {} s old with {:.0} m accuracy; it must be under {} s and {:.0} m. Check REM telemetry",
+            now.saturating_sub(fix.captured_at_ms) / 1000,
+            fix.horizontal_accuracy_m,
+            limits.map_or(0, |l| l.max_observer_age_ms / 1000),
+            limits.map_or(0.0, |l| l.max_horizontal_accuracy_m),
+        )
+    }
+
+    /// Reports an observer problem once per distinct reason.
+    pub(super) fn observer_report(&mut self, text: &str, actions: &mut Vec<Value>) {
+        if self.observer_problem.as_deref() != Some(text) {
+            self.observer_problem = Some(text.to_owned());
+            actions.push(json!({"kind":"status","message":text}));
+        }
     }
 
     fn accept_observer(&mut self, fix: ObserverFix, now: u64) -> Result<bool, String> {

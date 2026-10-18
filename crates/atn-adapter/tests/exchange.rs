@@ -164,13 +164,22 @@ fn capturing() -> Adapter {
 }
 /// Takes one observation through to a `map.markers.create` request.
 fn create_request(a: &mut Adapter) -> Value {
-    let v = observe(a);
-    let v = respond(
-        a,
-        &request(&v, "map.observer.snapshot"),
-        snapshot(0.0, 10000),
-    );
+    let v = placed(a);
     request(&v, "map.markers.create")
+}
+/// Observes once; a still-fresh position places it at once, otherwise REM's
+/// snapshot is answered. Returns the response holding `map.markers.create`.
+fn placed(a: &mut Adapter) -> Value {
+    let v = observe(a);
+    if requests(&v, "map.markers.create").is_empty() {
+        respond(
+            a,
+            &request(&v, "map.observer.snapshot"),
+            snapshot(0.0, 10000),
+        )
+    } else {
+        v
+    }
 }
 fn host_state(a: &mut Adapter, index: usize) -> Value {
     call(a, json!({"cmd":"status"}))["result"]["observations"][index]["host"].clone()
@@ -335,12 +344,7 @@ fn observation_creates_one_idempotent_shared_marker() {
     assert_eq!(host["state"], "created");
     assert_eq!(host["objectDestinationHash"], "host-minted");
     // A replayed key returns the original marker without a second creation.
-    let v = observe(&mut a);
-    let v = respond(
-        &mut a,
-        &request(&v, "map.observer.snapshot"),
-        snapshot(0.0, 10000),
-    );
+    let v = placed(&mut a);
     let second = request(&v, "map.markers.create");
     assert_ne!(second["payload"]["idempotencyKey"], key);
     let v = respond(
@@ -415,23 +419,13 @@ fn unconfirmed_colocation_blocks_creation_and_rejects_sessions() {
 #[test]
 fn create_rejection_timeout_and_binder_failure_stay_distinct() {
     let mut a = capturing();
-    let v = observe(&mut a);
-    let v = respond(
-        &mut a,
-        &request(&v, "map.observer.snapshot"),
-        snapshot(0.0, 10000),
-    );
+    let v = placed(&mut a);
     let v = fail(&mut a, &request(&v, "map.markers.create"), "InvalidRequest");
     assert_eq!(v["ok"], true);
     let host = &v["result"]["observations"][0]["host"];
     assert_eq!(host["state"], "rejected");
     assert_eq!(host["code"], "InvalidRequest");
-    let v = observe(&mut a);
-    let v = respond(
-        &mut a,
-        &request(&v, "map.observer.snapshot"),
-        snapshot(0.0, 10000),
-    );
+    let v = placed(&mut a);
     let create = request(&v, "map.markers.create");
     let v = call(&mut a, json!({"cmd":"tick","nowMs":12001}));
     assert_eq!(v["ok"], true, "{v}");
@@ -444,31 +438,26 @@ fn create_rejection_timeout_and_binder_failure_stay_distinct() {
         12001,
     );
     assert_eq!(v["result"]["ignored"], "unmatched host response");
-    let v = observe(&mut a);
-    let v = respond(
-        &mut a,
-        &request(&v, "map.observer.snapshot"),
-        snapshot(0.0, 10000),
-    );
+    let v = placed(&mut a);
     let v = fail(&mut a, &request(&v, "map.markers.create"), "binder.timeout");
     let host = &v["result"]["observations"][2]["host"];
     assert_eq!(host["state"], "unknown");
     assert_eq!(host["resolution"], "replayScheduled");
-    let v = observe(&mut a);
-    let v = respond(
-        &mut a,
-        &request(&v, "map.observer.snapshot"),
-        snapshot(0.0, 10000),
-    );
+    let v = placed(&mut a);
     let v = fail(
         &mut a,
         &request(&v, "map.markers.create"),
         "PermissionDenied",
     );
-    assert_eq!(v["ok"], false);
-    assert_eq!(
-        call(&mut a, json!({"cmd":"status"}))["result"]["hostReady"],
-        false
+    // A missing marker grant only stops measurements; REM stays usable
+    // (it used to make the whole adapter read-only).
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["result"]["hostReady"], true);
+    assert!(
+        v["result"]["capture"]["lastEnded"]
+            .as_str()
+            .unwrap()
+            .contains("Add and edit its own map markers")
     );
     // Revocation ended capture, so the scheduled replay can never run.
     let host = host_state(&mut a, 2);
@@ -1139,7 +1128,8 @@ fn capture_ends_on_every_authorization_change() {
             assert!(requests(&v, "map.observer.snapshot").is_empty());
         }
     }
-    // Capability revocation on an observer snapshot ends capture too.
+    // A refused observer snapshot ends capture too, naming the REM grant,
+    // without making REM unusable.
     let mut a = capturing();
     let v = observe(&mut a);
     let v = fail(
@@ -1147,14 +1137,14 @@ fn capture_ends_on_every_authorization_change() {
         &request(&v, "map.observer.snapshot"),
         "PermissionDenied",
     );
-    assert_eq!(v["ok"], false);
+    assert_eq!(v["ok"], true, "{v}");
     let status = capture_status(&mut a);
     assert_eq!(status["active"], false);
     assert!(
         status["lastEnded"]
             .as_str()
             .unwrap()
-            .contains("PermissionDenied")
+            .contains("Read this device's location")
     );
 }
 
@@ -1332,7 +1322,10 @@ fn stopping_capture_drops_unanswered_snapshots_and_restart_publishes_nothing_old
     let v = start_capture(&mut a);
     assert!(!has_action(&v, "hostRequest"));
     let v = call(&mut a, json!({"cmd":"tick","nowMs":11000}));
-    assert!(!has_action(&v, "hostRequest"));
+    // The tick may ask REM for nearby markers to display; it never publishes
+    // the earlier observations.
+    assert!(requests(&v, "map.observer.snapshot").is_empty());
+    assert!(requests(&v, "map.markers.create").is_empty());
     assert_eq!(host_state(&mut a, 0)["state"], "retained");
 }
 
@@ -1947,4 +1940,347 @@ fn partial_overrides_merge_onto_defaults_and_unknown_keys_fail() {
         call(&mut a, json!({"cmd":"status"}))["result"]["configured"],
         false
     );
+}
+
+fn nearby_marker(id: &str, lon: f64, updated_at: &str) -> Value {
+    let mut o = object(id, lon, updated_at);
+    o["notes"] = Value::Null;
+    o["distanceM"] = json!(lon * 111_000.0);
+    o
+}
+/// Connected, co-located and ready; returns the first nearby request.
+fn nearby_ready(a: &mut Adapter) -> Value {
+    ready(a);
+    colocate(a);
+    let v = call(a, json!({"cmd":"tick","nowMs":10000}));
+    request(&v, "map.markers.nearby")
+}
+
+#[test]
+fn nearby_rem_markers_are_shown_automatically_nearest_first() {
+    let mut a = connected_with_pool(&[2, 3]);
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":10000}));
+    let query = request(&v, "map.markers.nearby");
+    assert_eq!(query["payload"]["radiusM"], 10000.0);
+    assert_eq!(query["payload"]["limit"], 2);
+    let v = respond(
+        &mut a,
+        &query,
+        json!({"available":true,"radiusM":10000.0,"items":[nearby_marker("near",0.001,T1),nearby_marker("far",0.002,T1)]}),
+    );
+    assert_eq!(v["ok"], true, "{v}");
+    assert!(has_action(&v, "sessionAuthorized"));
+    let shown = v["result"]["sessions"][0].clone();
+    assert_eq!(shown["selected"].as_array().unwrap().len(), 2);
+    let v = respond(
+        &mut a,
+        &request(&v, "map.observer.snapshot"),
+        snapshot(0.0, 10000),
+    );
+    let w = write(&v);
+    assert!(w["sessionId"].as_str().unwrap().starts_with("rem-nearby-"));
+    // No map.session.stop is ever sent for the automatic set.
+    assert!(requests(&v, "map.session.stop").is_empty());
+}
+
+#[test]
+fn unchanged_nearby_markers_write_nothing_and_changes_replace_the_set() {
+    let mut a = connected_with_pool(&[2, 3]);
+    let query = request(
+        &call(&mut a, json!({"cmd":"tick","nowMs":10000})),
+        "map.markers.nearby",
+    );
+    let items = json!({"available":true,"radiusM":10000.0,"items":[nearby_marker("p",0.001,T1)]});
+    let v = respond(&mut a, &query, items.clone());
+    let mut v = respond(
+        &mut a,
+        &request(&v, "map.observer.snapshot"),
+        snapshot(0.0, 10000),
+    );
+    while has_action(&v, "write") {
+        v = complete(&mut a, &v);
+    }
+    let first_id = session_in(&call(&mut a, json!({"cmd":"status"})), "rem-nearby-1");
+    assert_ne!(first_id, Value::Null);
+    // Same membership and content: nothing is written.
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":15000}));
+    let query = request(&v, "map.markers.nearby");
+    let o = respond_at(
+        &mut a,
+        &request(&v, "map.observer.snapshot"),
+        snapshot(0.0, 15000),
+        15000,
+    );
+    assert!(!has_action(&o, "write"));
+    let v = respond_at(&mut a, &query, items, 15000);
+    assert!(!has_action(&v, "write"));
+    assert!(!has_action(&v, "sessionEnded"));
+    // A new marker nearer than the old one replaces the set; old slots are
+    // released without a device clear.
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":20000}));
+    let query = request(&v, "map.markers.nearby");
+    respond_at(
+        &mut a,
+        &request(&v, "map.observer.snapshot"),
+        snapshot(0.0, 20000),
+        20000,
+    );
+    let v = respond_at(
+        &mut a,
+        &query,
+        json!({"available":true,"radiusM":10000.0,"items":[nearby_marker("new",0.0005,T1),nearby_marker("p",0.001,T1)]}),
+        20000,
+    );
+    assert!(has_action(&v, "sessionEnded"));
+    assert_ne!(session_in(&v, "rem-nearby-2"), Value::Null);
+    let released = v["result"]["releasedSlots"].as_array().unwrap();
+    assert!(released.iter().all(|r| r["deviceDisplayCleared"] == false));
+}
+
+#[test]
+fn nearby_grant_missing_is_reported_once_and_breaks_nothing() {
+    let mut a = connected();
+    let query = nearby_ready(&mut a);
+    let v = fail(&mut a, &query, "PermissionDenied");
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["result"]["hostReady"], true);
+    let message = v["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["kind"] == "status")
+        .unwrap()["message"]
+        .clone();
+    assert!(
+        message
+            .as_str()
+            .unwrap()
+            .contains("Read all map markers near this device")
+    );
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":15000}));
+    let v = fail(
+        &mut a,
+        &request(&v, "map.markers.nearby"),
+        "PermissionDenied",
+    );
+    assert!(!has_action(&v, "status")); // not repeated
+    // REM shares keep working without the grant.
+    let v = started(&mut a, "shared", &[object("s", 0.001, T1)]);
+    assert!(has_action(&v, "sessionAuthorized"));
+}
+
+#[test]
+fn stop_pauses_nearby_markers_until_reconnect_and_rem_list_never_ends_them() {
+    let mut a = connected_with_pool(&[2, 3]);
+    let query = request(
+        &call(&mut a, json!({"cmd":"tick","nowMs":10000})),
+        "map.markers.nearby",
+    );
+    let v = respond(
+        &mut a,
+        &query,
+        json!({"available":true,"radiusM":10000.0,"items":[nearby_marker("p",0.001,T1)]}),
+    );
+    assert!(has_action(&v, "sessionAuthorized"));
+    // REM's session list does not know the automatic set and must not end it.
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":15000}));
+    let v = respond_at(
+        &mut a,
+        &request(&v, "map.session.list"),
+        json!({"items":[]}),
+        15000,
+    );
+    assert_ne!(session_in(&v, "rem-nearby-1"), Value::Null);
+    let v = call(&mut a, json!({"cmd":"stopSync","nowMs":15000}));
+    assert_eq!(v["result"]["sessions"], json!([]));
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":30000}));
+    assert!(requests(&v, "map.markers.nearby").is_empty());
+    call(
+        &mut a,
+        json!({"cmd":"connected","nowMs":30000,"connectionId":"again","writeCapacity":509}),
+    );
+    colocate(&mut a);
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":30000}));
+    request(&v, "map.markers.nearby");
+}
+
+#[test]
+fn an_unusable_rem_position_is_reported_once_and_not_requested_in_a_loop() {
+    let mut a = connected();
+    ready(&mut a);
+    colocate(&mut a);
+    let v = started(&mut a, "shared", &[object("p", 0.001, T1)]);
+    // REM's fix is far older than the synthetic 1 s limit.
+    let v = respond(
+        &mut a,
+        &request(&v, "map.observer.snapshot"),
+        snapshot(0.0, 1000),
+    );
+    assert_eq!(v["ok"], true, "{v}");
+    assert!(requests(&v, "map.observer.snapshot").is_empty(), "{v}");
+    let problem = v["result"]["observerProblem"].as_str().unwrap().to_owned();
+    assert!(problem.contains("9 s old"), "{problem}");
+    // Anything that pumps writes neither re-asks nor repeats the message.
+    let v = call(
+        &mut a,
+        json!({"cmd":"hostEvent","envelope":{"protocolVersion":1,"event":"map.session.object.updated","payload":{"sessionId":"shared","reason":"moved","object":object("p",0.002,T2)}}}),
+    );
+    assert!(requests(&v, "map.observer.snapshot").is_empty());
+    assert!(!has_action(&v, "status"));
+    // The next interval asks again.
+    let v = call(&mut a, json!({"cmd":"tick","nowMs":15000}));
+    request(&v, "map.observer.snapshot");
+}
+
+fn phone_fix(a: &mut Adapter, lon: f64, fix_time_ms: u64, now: u64) -> Value {
+    call(
+        a,
+        json!({"cmd":"phoneFix","nowMs":now,"lat":0.0,"lon":lon,"accuracyM":3.0,"fixTimeMs":fix_time_ms}),
+    )
+}
+
+#[test]
+fn phone_gps_places_measurements_without_asking_rem() {
+    let mut a = capturing();
+    let v = phone_fix(&mut a, 0.0, 10000, 10000);
+    assert_eq!(v["result"]["accepted"], true, "{v}");
+    let v = observe(&mut a);
+    assert!(requests(&v, "map.observer.snapshot").is_empty());
+    let create = request(&v, "map.markers.create");
+    assert!(create["payload"]["lon"].as_f64().unwrap() > 0.0);
+    assert_eq!(v["result"]["host"]["state"], "createRequested");
+}
+
+#[test]
+fn phone_gps_aims_shared_markers_and_ignores_jitter() {
+    let mut a = connected();
+    ready(&mut a);
+    colocate(&mut a);
+    phone_fix(&mut a, 0.0, 10000, 10000);
+    let v = started(&mut a, "shared", &[object("p", 0.001, T1)]);
+    let mut v = v;
+    while has_action(&v, "write") {
+        v = complete(&mut a, &v);
+    }
+    // Under 10 m of movement: nothing is rewritten.
+    let v = phone_fix(&mut a, 0.000_05, 10500, 10500);
+    assert_eq!(v["result"]["accepted"], true);
+    assert!(!has_action(&v, "write"), "{v}");
+    // About 55 m: the marker is re-aimed.
+    let v = phone_fix(&mut a, 0.000_5, 10600, 10600);
+    assert!(has_action(&v, "write"), "{v}");
+}
+
+#[test]
+fn a_stale_phone_fix_is_rejected_with_a_plain_reason() {
+    let mut a = capturing();
+    let v = phone_fix(&mut a, 0.0, 1000, 10000);
+    assert_eq!(v["result"]["accepted"], false);
+    let status = call(&mut a, json!({"cmd":"status"}));
+    assert!(
+        status["result"]["observerProblem"]
+            .as_str()
+            .unwrap()
+            .starts_with("The phone GPS")
+    );
+    // The measurement falls back to asking REM.
+    let v = observe(&mut a);
+    request(&v, "map.observer.snapshot");
+}
+
+fn icon_config() -> Value {
+    let mut c = config();
+    c["sendIcons"] = json!(true);
+    c["queueCapacity"] = json!(16);
+    c
+}
+fn color_of(w: &Value) -> u64 {
+    w["bytes"][3].as_u64().unwrap() & 7
+}
+
+#[test]
+fn markers_get_nato_colours_and_one_icon_each() {
+    let mut a = Adapter::new();
+    call(&mut a, json!({"cmd":"configure","config":icon_config()}));
+    call(
+        &mut a,
+        json!({"cmd":"connected","connectionId":"synthetic-connection","writeCapacity":509}),
+    );
+    ready(&mut a);
+    colocate(&mut a);
+    let mut hostile = object("h", 0.001, T1);
+    hostile["symbol"] = json!("hostile");
+    let mut unknown = object("u", 0.002, T1);
+    unknown["symbol"] = json!("unknown");
+    let v = started(&mut a, "shared", &[hostile, unknown]);
+    let mut v = respond(
+        &mut a,
+        &request(&v, "map.observer.snapshot"),
+        snapshot(0.0, 10000),
+    );
+    let mut writes = Vec::new();
+    while has_action(&v, "write") {
+        let w = write(&v);
+        writes.push(w.clone());
+        let t = transport_ok(&mut a, &w, 10000);
+        v = if w["totalFrames"] == w["frameNumber"] {
+            let command = w["bytes"][1].as_u64().unwrap();
+            call(
+                &mut a,
+                json!({"cmd":"notification","bytes":[1,command,3,0,0,0],"observedAtMs":10000}),
+            )
+        } else {
+            t
+        };
+    }
+    let positions: Vec<&Value> = writes.iter().filter(|w| w["bytes"][1] == 2).collect();
+    let icons: Vec<&Value> = writes.iter().filter(|w| w["bytes"][1] == 7).collect();
+    assert_eq!(positions.len(), 2);
+    assert_eq!(color_of(positions[0]), 0); // hostile red
+    assert_eq!(color_of(positions[1]), 2); // unknown yellow
+    assert_eq!(icons.len(), 2, "one single-frame icon per marker");
+    // Same symbol again: no new icon. Changed symbol: the icon is resent.
+    let mut moved = object("u", 0.003, T2);
+    moved["symbol"] = json!("unknown");
+    let v = call(
+        &mut a,
+        json!({"cmd":"hostEvent","envelope":{"protocolVersion":1,"event":"map.session.object.updated","payload":{"sessionId":"shared","reason":"moved","object":moved}}}),
+    );
+    assert_eq!(write(&v)["bytes"][1], 2);
+    assert_eq!(
+        session_in(&call(&mut a, json!({"cmd":"status"})), "shared")["queuedOperations"],
+        0
+    );
+    let mut renamed = object("u", 0.003, "2026-10-16T12:36:56Z");
+    renamed["symbol"] = json!("friendly");
+    call(
+        &mut a,
+        json!({"cmd":"transportResult","connectionId":"synthetic-connection","sessionId":"shared","operationId":write(&v)["operationId"],"frameNumber":1,"completed":true}),
+    );
+    call(
+        &mut a,
+        json!({"cmd":"notification","bytes":[1,2,3,0,0,0],"observedAtMs":10000}),
+    );
+    let v = call(
+        &mut a,
+        json!({"cmd":"hostEvent","envelope":{"protocolVersion":1,"event":"map.session.object.updated","payload":{"sessionId":"shared","reason":"symbol","object":renamed}}}),
+    );
+    assert_eq!(color_of(&write(&v)), 4); // friendly blue
+    assert_eq!(session_in(&v, "shared")["queuedOperations"], 1); // its new icon
+}
+
+#[test]
+fn generic_symbols_keep_the_configured_blue() {
+    let mut a = connected();
+    ready(&mut a);
+    colocate(&mut a);
+    let mut vehicle = object("v", 0.001, T1);
+    vehicle["symbol"] = json!("vehicle");
+    let v = started(&mut a, "shared", &[vehicle]);
+    let v = respond(
+        &mut a,
+        &request(&v, "map.observer.snapshot"),
+        snapshot(0.0, 10000),
+    );
+    assert_eq!(color_of(&write(&v)), 4);
 }

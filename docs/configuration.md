@@ -10,17 +10,47 @@ nothing to fill in.
 2. Open the plugin, tap **Scan for Binox** (Bluetooth permission is requested the first time) and
    tap your Binox. Do not pair it in Android's Bluetooth settings.
 3. Answer **Is this phone with the binocular?** REM uses the phone's position for the Binox's.
-   - **Yes:** each new measurement becomes a shared REM marker, and markers you share in REM
-     (**Share with ATN Rangefinder** on a marker sheet) appear on the Binox.
+   - **Yes:** each new measurement becomes a shared REM marker, and REM markers within the
+     Binox's range appear on the Binox automatically, nearest first.
+     This needs a one-time REM 1.5.2 grant: **Settings → Plugins → ATN Rangefinder → Read all map
+     markers near this device**. REM's per-marker **Share with ATN Rangefinder** still works too.
    - **No:** measurements stay on the phone and shares are refused.
 4. The top of the screen says what is happening in plain words: REM, Binox, whether
    measurements go to REM, how many REM markers are on the Binox, and the last measurement.
 
 **Send Binox measurements to REM as markers** (on by default) turns marker creation off and on.
-Measurements taken while it is off, or before connecting, are never sent later. **Stop showing
-REM markers** ends all display sessions; releasing a slot does not clear the Binox display. Up
-to four REM shares run at once; a share that does not fit is refused on its own, with the reason
-raised as a REM notification.
+Measurements taken while it is off, or before connecting, are never sent later.
+
+The automatic set is refreshed every `reconcileIntervalMs` (5 s) from REM's `map.markers.nearby`
+within `semantics.maxDistanceM` (10 km) of the phone. It uses the display slots that REM shares
+leave free (slots 1–16 by default). Unchanged markers are not rewritten; when the nearest set
+changes, the set is replaced. **Stop showing REM markers** ends the automatic set and all REM
+shares until the next Connect. Releasing a slot does not clear the Binox display. Up to four REM
+shares run at once; a share that does not fit is refused on its own, with the reason raised as a
+REM notification.
+
+**Phone position.** With **Yes**, the plugin keeps this phone's GPS running (1 s updates) while
+the Binox is connected, asking once for location permission. That fix places measurements and
+aims markers. REM's own position is the fallback; it is only refreshed at REM's telemetry
+interval (6 min by default) and not while REM is in the background. Both must be under 10 minutes
+old and within 50 m accuracy. The Binox display is re-aimed only after the phone moved more than
+10 m. On GrapheneOS without network location, the first GPS fix outdoors can take a minute or
+more, and there may be none indoors.
+
+**Colours and icons.** Each marker's Binox colour follows its REM symbol's NATO affiliation:
+hostile red, unknown yellow, neutral green, friendly blue. Generic symbols use `color` (blue 4).
+`markerType` 1, the Binox 4K default, makes the radar dots show those colours. With `sendIcons`
+(on by default), each marker also gets a 40×40 RGBA PNG icon after its position: the white NATO
+frame (rectangle, diamond, square, clover) or a dot on a circle in its colour. The icon is resent
+only when the symbol changes.
+
+**REM permissions.** Allow ATN Rangefinder these in REM (**Settings → Plugins**):
+- "Read its own map markers" and "Add and edit its own map markers";
+- "Read this device's location";
+- "Read map objects you share with it" and "Read all map markers near this device";
+- "Raise notifications".
+
+A missing grant only disables its own feature. The plugin's status says which grant to allow.
 
 The plugin logs every REM event and decision under the Android log tag `AtnPlugin`
 (`adb logcat -s AtnPlugin`), without coordinates or device addresses.

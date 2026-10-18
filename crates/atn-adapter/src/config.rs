@@ -52,7 +52,11 @@ pub struct AdapterConfig {
     pub eligibility: EligibilityPolicy,
     pub pitch_policy: MarkerPitchPolicy,
     pub marker_type: u8,
+    /// Colour index for generic (non-NATO) symbols; NATO symbols use their
+    /// affiliation colour.
     pub color: u8,
+    /// Send each displayed marker's icon (40×40 PNG) after its position.
+    pub send_icons: bool,
     pub queue_capacity: usize,
     pub max_queued_bytes: usize,
     pub queue_ttl_ms: u64,

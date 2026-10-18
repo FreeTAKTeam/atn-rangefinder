@@ -1,5 +1,6 @@
 //! Bounded JSON runtime for Android's trusted REM/BLE boundary.
 mod config;
+pub mod icons;
 mod native;
 mod rch;
 mod runtime;

@@ -12,7 +12,7 @@
     "displayBounds":{"distance":{"min":0,"max":10000},"pitch":{"min":-90,"max":90},"compass":{"min":0,"max":359}}
   },
   "eligibility":{"maxObserverAgeMs":1000,"maxObservationAgeMs":1000,"maxDeclinationAgeMs":1000,"maxHorizontalAccuracyM":5.0},
-  "pitchPolicy":"horizontalDisplay", "markerType":0, "color":4,
+  "pitchPolicy":"horizontalDisplay", "markerType":0, "color":4, "sendIcons":false,
   "queueCapacity":8, "maxQueuedBytes":65536, "queueTtlMs":5000,
   "operationTimeoutMs":3000, "createRetryDelayMs":500, "reconcileIntervalMs":5000, "maxObservations":8,
   "transport":{"requestMtu":512,"connectTimeoutMs":10000,"writeTimeoutMs":3000,"hostRequestTimeoutMs":2000,"maxPendingHostRequests":16,"maxQueuedWrites":1,"scanTimeoutMs":5000},

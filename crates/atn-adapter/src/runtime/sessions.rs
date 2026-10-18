@@ -11,6 +11,7 @@ use super::{
     ReleasedSlot, RemMapObject, SelectedPle, SessionConfig, SyncSession, TERMINAL_SESSION_BOUND,
     Value, WRITE_UUID, decode, gatt_uuid, integer, json, marker_for_ple, text,
 };
+use crate::icons::Affiliation;
 use atn_domain::{DomainError, OperationKind};
 use atn_protocol::OpaqueReply;
 use std::collections::BTreeSet;
@@ -178,7 +179,7 @@ impl Adapter {
             }
             return Ok(());
         }
-        if self.displays.len() >= MAX_DISPLAY_SESSIONS {
+        if self.displays.iter().filter(|d| !d.nearby).count() >= MAX_DISPLAY_SESSIONS {
             self.reject_session(&id, "REM session limit reached", now, actions);
             return Ok(());
         }
@@ -186,49 +187,12 @@ impl Adapter {
             self.reject_session(&id, &reason, now, actions);
             return Ok(());
         }
-        if ids.is_empty() || ids.iter().any(|i| i.trim().is_empty()) {
-            self.reject_session(&id, "selection is empty", now, actions);
+        if let Some(reason) =
+            self.start_display(&id, &ids, false, objects.is_none(), now, actions)?
+        {
+            self.reject_session(&id, &reason, now, actions);
             return Ok(());
         }
-        let free = self.free_slots();
-        if ids.len() > free.len() {
-            self.reject_session(&id, "configured slot pool exhausted", now, actions);
-            return Ok(());
-        }
-        let c = self.config.as_ref().ok_or("configuration required")?;
-        let selected = ids
-            .iter()
-            .zip(free)
-            .map(|(ple_id, slot_id)| SelectedPle {
-                ple_id: ple_id.clone(),
-                slot_id,
-            })
-            .collect();
-        let config = SessionConfig {
-            session_id: id.clone(),
-            selected,
-            queue_capacity: c.queue_capacity,
-            max_queued_bytes: c.max_queued_bytes,
-            queue_ttl_ms: c.queue_ttl_ms,
-            operation_timeout_ms: c.operation_timeout_ms,
-        };
-        let sync = match SyncSession::start(config, now) {
-            Ok(sync) => sync,
-            Err(error) => {
-                self.reject_session(&id, &error.to_string(), now, actions);
-                return Ok(());
-            }
-        };
-        self.displays.push(Display {
-            sync,
-            markers: std::collections::BTreeMap::new(),
-            last_encoded: std::collections::BTreeMap::new(),
-            accepted_at_ms: now,
-            snapshot_at_ms: now,
-            dirty: objects.is_none(),
-        });
-        actions.push(json!({"kind":"sessionAuthorized","sessionId":id,
-            "connectionId":self.connection.as_ref().map(|(c,_)|c)}));
         match objects {
             Some(objects) => self.apply_objects(&id, objects, now, actions)?,
             None => self.request(
@@ -240,6 +204,61 @@ impl Adapter {
             )?,
         }
         self.refresh_observer(now, actions)
+    }
+
+    /// Allocates free slots in selection order and starts a display. Returns
+    /// the refusal reason when the selection cannot be served; nothing is
+    /// allocated then.
+    pub(super) fn start_display(
+        &mut self,
+        id: &str,
+        ids: &[String],
+        nearby: bool,
+        dirty: bool,
+        now: u64,
+        actions: &mut Vec<Value>,
+    ) -> Result<Option<String>, String> {
+        if ids.is_empty() || ids.iter().any(|i| i.trim().is_empty()) {
+            return Ok(Some("selection is empty".into()));
+        }
+        let free = self.free_slots();
+        if ids.len() > free.len() {
+            return Ok(Some("configured slot pool exhausted".into()));
+        }
+        let c = self.config.as_ref().ok_or("configuration required")?;
+        let selected = ids
+            .iter()
+            .zip(free)
+            .map(|(ple_id, slot_id)| SelectedPle {
+                ple_id: ple_id.clone(),
+                slot_id,
+            })
+            .collect();
+        let config = SessionConfig {
+            session_id: id.to_owned(),
+            selected,
+            queue_capacity: c.queue_capacity,
+            max_queued_bytes: c.max_queued_bytes,
+            queue_ttl_ms: c.queue_ttl_ms,
+            operation_timeout_ms: c.operation_timeout_ms,
+        };
+        let sync = match SyncSession::start(config, now) {
+            Ok(sync) => sync,
+            Err(error) => return Ok(Some(error.to_string())),
+        };
+        self.displays.push(Display {
+            sync,
+            markers: std::collections::BTreeMap::new(),
+            last_encoded: std::collections::BTreeMap::new(),
+            accepted_at_ms: now,
+            snapshot_at_ms: now,
+            dirty,
+            nearby,
+            icons: std::collections::BTreeMap::new(),
+        });
+        actions.push(json!({"kind":"sessionAuthorized","sessionId":id,
+            "connectionId":self.connection.as_ref().map(|(c,_)|c)}));
+        Ok(None)
     }
 
     /// Reconciles against an authoritative `map.session.list`. Sessions
@@ -259,7 +278,9 @@ impl Adapter {
         let missing: Vec<String> = self
             .displays
             .iter()
-            .filter(|d| d.accepted_at_ms <= sent_at_ms && !listed.contains(d.sync.session_id()))
+            .filter(|d| {
+                !d.nearby && d.accepted_at_ms <= sent_at_ms && !listed.contains(d.sync.session_id())
+            })
             .map(|d| d.sync.session_id().to_owned())
             .collect();
         for id in missing {
@@ -275,7 +296,7 @@ impl Adapter {
         let fetch: Vec<String> = self
             .displays
             .iter()
-            .filter(|d| listed.contains(d.sync.session_id()))
+            .filter(|d| !d.nearby && listed.contains(d.sync.session_id()))
             .filter(|d| d.dirty || now.saturating_sub(d.snapshot_at_ms) >= interval)
             .map(|d| d.sync.session_id().to_owned())
             .collect();
@@ -326,7 +347,7 @@ impl Adapter {
         {
             self.request_session_list(now, actions)?;
         }
-        Ok(())
+        self.nearby_tick(now, actions)
     }
 
     /// Applies an authoritative snapshot of one session's objects. Objects REM
@@ -395,6 +416,7 @@ impl Adapter {
             .remove_selected(ple_id)
             .map_err(|e| e.to_string())?;
         display.markers.remove(ple_id);
+        display.icons.remove(ple_id);
         display.last_encoded.remove(ple_id);
         let remaining = display.sync.snapshot();
         self.release_slot(slot_id, session_id, ple_id, "object left the REM session");
@@ -579,7 +601,9 @@ impl Adapter {
         }
         let c = self.config.as_ref().ok_or("configuration required")?;
         let observer = self.observer.as_ref();
+        let capacity = self.connection.as_ref().map(|(_, capacity)| *capacity);
         let mut failed = Vec::new();
+        let mut icon_problems = Vec::new();
         for display in &mut self.displays {
             if only.is_some_and(|id| id != display.sync.session_id()) {
                 continue;
@@ -589,10 +613,16 @@ impl Adapter {
                     continue;
                 };
                 let ple = record.as_ple().map_err(|e| e.to_string())?;
+                // NATO affiliation colours; generic symbols keep the configured colour (blue).
+                let affiliation = Affiliation::of_symbol(record.symbol.as_deref());
                 let style = MarkerStyle {
                     slot_id: item.slot_id,
                     marker_type: c.marker_type,
-                    color: c.color,
+                    color: if affiliation == Affiliation::Generic {
+                        c.color
+                    } else {
+                        affiliation.binox_color()
+                    },
                     enabled: true,
                 };
                 let marker = marker_for_ple(
@@ -606,22 +636,40 @@ impl Adapter {
                 )
                 .map_err(|e| e.to_string())?;
                 let bytes = marker.encode().to_vec();
-                if display.last_encoded.get(&item.ple_id) == Some(&bytes) {
-                    continue;
+                if display.last_encoded.get(&item.ple_id) != Some(&bytes) {
+                    if let Err(error) = display.sync.enqueue_position(&item.ple_id, &marker, now) {
+                        failed.push((
+                            display.sync.session_id().to_owned(),
+                            error.to_string(),
+                            display.partial_icon(),
+                        ));
+                        break;
+                    }
+                    display.last_encoded.insert(item.ple_id.clone(), bytes);
                 }
-                if let Err(error) = display.sync.enqueue_position(&item.ple_id, &marker, now) {
-                    failed.push((
-                        display.sync.session_id().to_owned(),
-                        error.to_string(),
-                        display.partial_icon(),
-                    ));
-                    break;
+                // The icon follows the first position, and again when the symbol changes.
+                if c.send_icons && display.icons.get(&item.ple_id) != Some(&affiliation) {
+                    display.icons.insert(item.ple_id.clone(), affiliation);
+                    let queued = capacity
+                        .ok_or_else(|| "BLE disconnected".to_owned())
+                        .and_then(|capacity| {
+                            let png = affiliation.icon_png()?;
+                            display
+                                .sync
+                                .enqueue_icon(&item.ple_id, &png, capacity, c.png_limits, now)
+                                .map_err(|e| e.to_string())
+                        });
+                    if let Err(error) = queued {
+                        icon_problems.push(format!("icon not sent: {error}"));
+                    }
                 }
-                display.last_encoded.insert(item.ple_id, bytes);
             }
         }
         for (id, reason, partial) in failed {
             self.end_display(&id, &reason, true, partial, now, actions);
+        }
+        for problem in icon_problems {
+            actions.push(json!({"kind":"status","message":problem}));
         }
         self.pump(now, actions)
     }
@@ -636,9 +684,10 @@ impl Adapter {
         self.write_gate(now)?;
         if let Err(reason) = self.observer_valid(now) {
             // Hold rather than send relative geometry from an ineligible fix.
-            actions.push(
-                json!({"kind":"status","message":format!("holding display writes: {reason}")}),
-            );
+            // A specific reason from REM's last answer stays on screen.
+            if self.observer_problem.is_none() {
+                self.observer_report(&format!("holding display writes: {reason}"), actions);
+            }
             return self.refresh_observer(now, actions);
         }
         let count = self.displays.len();

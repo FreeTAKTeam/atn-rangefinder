@@ -4,7 +4,13 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.Manifest;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ServiceInfo;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -52,9 +58,16 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
     private int observationCount;
     private String lastMeasurement = "";
     private int displayedMarkers;
+    private String positionProblem = "";
     // The operator's answer at Connect: this phone is with the binocular.
     private boolean withBinocular;
     private long lastCaptureAttemptMs;
+    // The phone's own GPS, running while the Binox is connected; REM's position is the fallback.
+    private LocationManager locations;
+    private boolean gpsRunning;
+    private String gpsState = "";
+    private boolean gpsUsable;
+    private final LocationListener gps = this::phoneFix;
     private String captureSummary = "Capture not started";
     private boolean foreground;
     private long nativeTickBoundMs;
@@ -79,6 +92,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
         super.onCreate();
         preferences = new PluginPreferences(this);
         ble = new BleTransport(this, handler, this);
+        locations = getSystemService(LocationManager.class);
         requests = new HostRequests(handler, envelope -> call(command("hostResponse", "envelope", envelope)));
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager != null) manager.createNotificationChannel(new NotificationChannel(CHANNEL, "ATN observations", NotificationManager.IMPORTANCE_LOW));
@@ -172,6 +186,8 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
             .append("\nMeasurements to REM: ").append(measurements)
             .append("\nOn the Binox: ").append(displayedMarkers == 0 ? "nothing shared" : displayedMarkers + " REM marker" + (displayedMarkers == 1 ? "" : "s"));
         if (!lastMeasurement.isEmpty()) line.append("\nLast measurement: ").append(lastMeasurement);
+        if (!gpsState.isEmpty()) line.append("\nPhone GPS: ").append(gpsState);
+        else if (!positionProblem.isEmpty() && ble.ready()) line.append("\nPhone position: ").append(positionProblem);
         line.append("\n\n").append(status);
         return line.toString();
     }
@@ -186,6 +202,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
             writes = new SerialWriteQueue(transport.maxQueuedWrites);
             connectionId = UUID.randomUUID().toString();
             ensureForeground();
+            if (withBinocular) startGps();
             status = "Connecting to " + preferences.alias();
             ble.connect(preferences.address(), transport);
         } catch (JSONException | IllegalStateException | SecurityException error) {
@@ -199,6 +216,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
         status = "Disconnected";
     }
     private void disconnectTransport() {
+        stopGps();
         authorizedSessions.clear();
         call(command("stopSync"));
         cancelWrites("cancelled");
@@ -294,6 +312,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
         call(request);
     }
     private void endHost(String reason) {
+        stopGps();
         IRemPluginHost previous = host;
         host = null; authorizedSessions.clear(); apiMinor = -1; captureActive = false; colocationConfirmed = false;
         handler.removeCallbacks(tick);
@@ -348,6 +367,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
         sessionsSummary = describeSessions(state);
         colocationConfirmed = state.optBoolean("colocationConfirmed");
         hostReady = state.optBoolean("hostReady");
+        positionProblem = state.isNull("observerProblem") ? "" : state.optString("observerProblem");
         JSONArray sessions = state.optJSONArray("sessions");
         displayedMarkers = 0;
         for (int i = 0; sessions != null && i < sessions.length(); i++) {
@@ -558,6 +578,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
         call(request);
     }
     @Override public void disconnected(String reason) {
+        stopGps();
         authorizedSessions.clear();
         captureActive = false;
         call(command("disconnected", "reason", reason));
@@ -570,7 +591,52 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
         Notification notification = new Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .setContentTitle("ATN rangefinder connected").setContentText("Open to stop or manage selected-point synchronization")
             .setContentIntent(settings).setOngoing(true).build();
-        startForeground(NOTIFICATION_ID, notification); foreground = true;
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            int types = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE;
+            if (hasLocationPermission()) types |= ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
+            startForeground(NOTIFICATION_ID, notification, types);
+        } else {
+            startForeground(NOTIFICATION_ID, notification);
+        }
+        foreground = true;
+    }
+    private boolean hasLocationPermission() {
+        return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+    }
+    /** Keeps the phone's GPS running (1 s) so the Binox always has a fresh observer position. */
+    private void startGps() {
+        if (gpsRunning || locations == null) return;
+        if (!hasLocationPermission()) { gpsState = "no location permission; using REM's position"; return; }
+        try {
+            locations.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, gps, Looper.getMainLooper());
+            gpsRunning = true;
+            gpsState = "searching for satellites";
+            Log.i(TAG, "Phone GPS started");
+        } catch (SecurityException | IllegalArgumentException error) {
+            gpsState = "unavailable; using REM's position";
+        }
+    }
+    private void stopGps() {
+        if (!gpsRunning || locations == null) return;
+        locations.removeUpdates(gps);
+        gpsRunning = false;
+        gpsUsable = false;
+        gpsState = "";
+        Log.i(TAG, "Phone GPS stopped");
+    }
+    private void phoneFix(Location location) {
+        if (!location.hasAccuracy()) return;
+        JSONObject request = command("phoneFix", "lat", location.getLatitude());
+        try {
+            request.put("lon", location.getLongitude()).put("accuracyM", location.getAccuracy())
+                .put("fixTimeMs", location.getTime());
+        } catch (JSONException ignored) { }
+        JSONObject result = call(request).optJSONObject("result");
+        boolean accepted = result != null && result.optBoolean("accepted");
+        long accuracy = Math.round(location.getAccuracy());
+        if (accepted != gpsUsable) Log.i(TAG, "Phone GPS " + (accepted ? "fix usable" : "fix not usable") + ", \u00b1" + accuracy + " m");
+        gpsUsable = accepted;
+        gpsState = accepted ? "fix, \u00b1" + accuracy + " m" : "fix too inaccurate (\u00b1" + accuracy + " m)";
     }
     private void stopForeground() { if (foreground) { stopForeground(STOP_FOREGROUND_REMOVE); foreground = false; } }
     @Override public void onDestroy() {
