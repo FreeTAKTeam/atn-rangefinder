@@ -1337,14 +1337,15 @@ fn stopping_capture_drops_unanswered_snapshots_and_restart_publishes_nothing_old
 }
 
 #[test]
-fn retry_delay_is_explicit_configuration() {
+// Convention over configuration: an omitted delay takes the built-in default;
+// an explicit zero is still rejected.
+fn retry_delay_defaults_when_omitted_and_zero_is_rejected() {
     let mut a = Adapter::new();
     let mut c = config();
     c.as_object_mut().unwrap().remove("createRetryDelayMs");
-    assert_eq!(
-        call(&mut a, json!({"cmd":"configure","config":c}))["ok"],
-        false
-    );
+    let v = call(&mut a, json!({"cmd":"configure","config":c}));
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["result"]["config"]["createRetryDelayMs"], 500);
     let mut c = config();
     c["createRetryDelayMs"] = json!(0);
     assert_eq!(
@@ -1899,4 +1900,51 @@ fn transport_echo_must_name_the_write_characteristic_and_failures_are_typed() {
             .contains("gattStatus")
     );
     assert!(has_action(&v, "cancelWrites"));
+}
+
+#[test]
+fn built_in_binox_4k_defaults_need_no_configuration() {
+    let mut a = Adapter::new();
+    let v = call(&mut a, json!({"cmd":"configure"}));
+    assert_eq!(v["ok"], true, "{v}");
+    let c = &v["result"]["config"];
+    assert_eq!(c["deviceProfile"]["model"], "Binox 4K");
+    assert_eq!(c["deviceProfile"]["protocolVerified"], true);
+    assert_eq!(c["semantics"]["distanceMetersPerUnit"], 1.0);
+    assert_eq!(c["transport"]["scanTimeoutMs"], 5000);
+    // With defaults alone a co-located connection can capture straight away.
+    call(
+        &mut a,
+        json!({"cmd":"connected","connectionId":"c","writeCapacity":509}),
+    );
+    ready(&mut a);
+    colocate(&mut a);
+    start_capture(&mut a);
+}
+
+#[test]
+fn partial_overrides_merge_onto_defaults_and_unknown_keys_fail() {
+    let mut a = Adapter::new();
+    let v = call(
+        &mut a,
+        json!({"cmd":"resolveConfig","config":{"transport":{"scanTimeoutMs":8000},"color":2}}),
+    );
+    assert_eq!(v["ok"], true, "{v}");
+    let c = &v["result"]["config"];
+    assert_eq!(c["transport"]["scanTimeoutMs"], 8000);
+    assert_eq!(c["transport"]["connectTimeoutMs"], 10000);
+    assert_eq!(c["color"], 2);
+    assert_eq!(c["deviceProfile"]["model"], "Binox 4K");
+    let v = call(
+        &mut a,
+        json!({"cmd":"configure","config":{"transport":{"scanTimeoutMS":8000}}}),
+    );
+    assert_eq!(v["ok"], false);
+    let v = call(&mut a, json!({"cmd":"configure","config":[1]}));
+    assert_eq!(v["ok"], false);
+    // The resolve command never applies the configuration.
+    assert_eq!(
+        call(&mut a, json!({"cmd":"status"}))["result"]["configured"],
+        false
+    );
 }

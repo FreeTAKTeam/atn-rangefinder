@@ -9,6 +9,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.RemoteException;
+import android.util.Log;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
@@ -24,7 +25,9 @@ import org.json.JSONObject;
 
 /** Trusted REM Binder boundary; one handler owns native state, GATT, and write scheduling. */
 public final class AtnPluginService extends RemPluginService implements BleTransport.Listener {
+    private static final String TAG = "AtnPlugin";
     private static final String CHANNEL = "atn-observations";
+    private static final long CAPTURE_RETRY_MS = 5000;
     private static final int NOTIFICATION_ID = 17012;
     private static volatile AtnPluginService instance;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -37,7 +40,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
     private IBinder.DeathRecipient deathRecipient;
     private String connectionId = "";
     private int apiMinor = -1;
-    private String status = "Enable the plugin in REM (API 1.3), grant its map capabilities, configure transport, then select and connect a device";
+    private String status = "Choose your Binox and tap Connect";
     private String lastNativeResult = "";
     // REM sessions admitted for display writes on this connection (up to four).
     private final Set<String> authorizedSessions = new HashSet<>();
@@ -45,6 +48,13 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
     // Mirrors of native state for the UI only; Rust enforces both gates.
     private boolean colocationConfirmed;
     private boolean captureActive;
+    private boolean hostReady;
+    private int observationCount;
+    private String lastMeasurement = "";
+    private int displayedMarkers;
+    // The operator's answer at Connect: this phone is with the binocular.
+    private boolean withBinocular;
+    private long lastCaptureAttemptMs;
     private String captureSummary = "Capture not started";
     private boolean foreground;
     private long nativeTickBoundMs;
@@ -57,6 +67,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
             if (host == null || transport == null) return;
             if (!ble.hasPermission()) ble.close("Bluetooth permission revoked");
             call(command("tick"));
+            ensureCapture();
             long bound = Math.min(transport.hostRequestTimeoutMs, transport.writeTimeoutMs);
             if (nativeTickBoundMs > 0) bound = Math.min(bound, nativeTickBoundMs);
             long cadence = Math.max(1L, bound / 2);
@@ -91,17 +102,12 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
             // REM passes the negotiated minor; a host older than 1.3 never binds this plugin.
             try { apiMinor = new JSONObject(sessionJson).optInt("apiMinor", -1); }
             catch (JSONException error) { apiMinor = -1; }
+            Log.i(TAG, "REM bound, plugin API 1." + apiMinor);
             status = apiMinor >= PluginProtocol.MAP_SESSION_API_MINOR
-                ? "REM connected (plugin API 1." + apiMinor + "). Select and connect a device explicitly"
-                : "REM plugin API 1." + PluginProtocol.MAP_SESSION_API_MINOR + " required; map exchange unavailable";
-            try {
-                transport = preferences.transport();
-                JSONObject config = preferences.config();
-                if (config.length() > 0) {
-                    nativeTickBoundMs = Math.min(config.getLong("operationTimeoutMs"), config.getLong("queueTtlMs"));
-                    call(command("configure", "config", config));
-                }
-            } catch (JSONException error) { status = "Transport configuration required"; }
+                ? "REM connected"
+                : "REM is too old: plugin API 1." + PluginProtocol.MAP_SESSION_API_MINOR + " required";
+            try { applyConfig(preferences.overrides()); }
+            catch (JSONException error) { status = "Saved override is invalid: " + error.getMessage(); }
             call(command("hostStarted", "apiMinor", Math.max(apiMinor, 0)));
             scheduleTick();
         });
@@ -111,7 +117,12 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
         handler.post(() -> {
             try {
                 PluginProtocol.requireJsonSize(eventJson, "Host event");
-                call(command("hostEvent", "envelope", new JSONObject(eventJson)));
+                JSONObject envelope = new JSONObject(eventJson);
+                JSONObject payload = envelope.optJSONObject("payload");
+                Log.i(TAG, "REM event " + envelope.optString("event") + " session=" + (payload == null ? "" : payload.optString("sessionId")));
+                JSONObject response = call(command("hostEvent", "envelope", envelope));
+                JSONObject result = response.optJSONObject("result");
+                if (result != null && result.has("ignored")) Log.i(TAG, "REM event ignored: " + result.optString("ignored"));
             } catch (JSONException error) { status = "Malformed host event rejected"; }
         });
     }
@@ -139,81 +150,112 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
         AtnPluginService current = instance;
         if (current != null) current.handler.post(() -> action.accept(current));
     }
-    static String summary() { AtnPluginService current = instance; return current == null ? "Plugin not running. Enable it and start the node in REM" : current.status; }
     static String nativeResult() { AtnPluginService current = instance; return current == null ? "" : current.lastNativeResult; }
     static String sessionsStatus() { AtnPluginService current = instance; return current == null ? "No display sessions" : current.sessionsSummary; }
-    static String captureStatus() { AtnPluginService current = instance; return current == null ? "Capture not started" : current.captureSummary; }
-    void connectFromUi() {
+    /** One plain-language line: REM, Binox, measurements and what is on the Binox. */
+    static String statusLine() {
+        AtnPluginService current = instance;
+        if (current == null) return "REM: plugin not running. Enable ATN Rangefinder in REM and start the node";
+        return current.describe();
+    }
+    private String describe() {
+        String rem = host == null ? "not running" : hostReady ? "connected" : "connecting";
+        String binox = ble.ready() ? "connected" : (writes != null && !connectionId.isEmpty() ? "connecting" : "not connected");
+        String measurements;
+        if (!preferences.sendMeasurements()) measurements = "off";
+        else if (captureActive) measurements = "on";
+        else if (ble.ready() && !withBinocular) measurements = "off (phone not with the binocular)";
+        else measurements = "waiting";
+        StringBuilder line = new StringBuilder()
+            .append("REM: ").append(rem)
+            .append("\nBinox: ").append(binox)
+            .append("\nMeasurements to REM: ").append(measurements)
+            .append("\nOn the Binox: ").append(displayedMarkers == 0 ? "nothing shared" : displayedMarkers + " REM marker" + (displayedMarkers == 1 ? "" : "s"));
+        if (!lastMeasurement.isEmpty()) line.append("\nLast measurement: ").append(lastMeasurement);
+        line.append("\n\n").append(status);
+        return line.toString();
+    }
+    void connectFromUi(boolean phoneWithBinocular) {
         if (host == null) { status = "Start the REM node and enable this plugin first"; return; }
+        withBinocular = phoneWithBinocular;
         try {
             transport = preferences.transport();
             scheduleTick();
-            if (preferences.address().isEmpty()) { status = "Select a device first"; return; }
-            disconnectFromUi();
+            if (preferences.address().isEmpty()) { status = "Scan and choose your Binox first"; return; }
+            disconnectTransport();
             writes = new SerialWriteQueue(transport.maxQueuedWrites);
             connectionId = UUID.randomUUID().toString();
             ensureForeground();
-            status = "Connecting selected device in read-only mode";
+            status = "Connecting to " + preferences.alias();
             ble.connect(preferences.address(), transport);
         } catch (JSONException | IllegalStateException | SecurityException error) {
-            status = "Connection rejected: check permissions and transport configuration";
+            status = "Could not connect: check that Bluetooth is on and permissions are granted";
             ble.close(status); stopForeground();
         }
     }
     void disconnectFromUi() {
+        withBinocular = false;
+        disconnectTransport();
+        status = "Disconnected";
+    }
+    private void disconnectTransport() {
         authorizedSessions.clear();
         call(command("stopSync"));
         cancelWrites("cancelled");
         ble.close("Disconnected by operator");
         stopForeground();
     }
-    JSONObject configureFromUi(JSONObject config) {
+    /** Applies built-in defaults plus the given override; returns the native response. */
+    private JSONObject applyConfig(JSONObject overrides) throws JSONException {
+        JSONObject response = call(command("configure", "config", overrides));
+        JSONObject result = response.optJSONObject("result");
+        JSONObject config = result == null ? null : result.optJSONObject("config");
+        if (!response.optBoolean("ok") || config == null) return response;
+        transport = new TransportSettings(config.getJSONObject("transport"));
+        nativeTickBoundMs = Math.min(config.getLong("operationTimeoutMs"), config.getLong("queueTtlMs"));
+        return response;
+    }
+    /** Advanced: saves a partial override (empty object = built-in defaults). */
+    JSONObject configureFromUi(JSONObject overrides) {
         authorizedSessions.clear();
         cancelWrites("cancelled");
-        try { transport = preferences.transport(); }
-        catch (JSONException error) { status = "Save valid transport policy before map configuration"; return new JSONObject(); }
-        JSONObject response = call(command("configure", "config", config));
-        if (response.optBoolean("ok")) {
-            preferences.saveConfig(config);
-            try { nativeTickBoundMs = Math.min(config.getLong("operationTimeoutMs"), config.getLong("queueTtlMs")); }
-            catch (JSONException error) { nativeTickBoundMs = 0; }
-        }
+        JSONObject response;
+        try {
+            response = applyConfig(overrides);
+            if (response.optBoolean("ok")) preferences.saveOverrides(overrides);
+        } catch (JSONException error) { response = new JSONObject(); status = "Override rejected: " + error.getMessage(); }
+        // Configuration resets co-location natively; keep the operator's Connect answer.
+        if (withBinocular && ble.ready()) call(command("confirmColocation", "evidenceId", "operator confirmed at connect"));
         scheduleTick();
         return response;
+    }
+    void setSendMeasurementsFromUi(boolean value) {
+        preferences.setSendMeasurements(value);
+        if (!value && captureActive) call(command("stopCapture"));
+        lastCaptureAttemptMs = 0;
+        ensureCapture();
+    }
+    /**
+     * Keeps measurements flowing to REM whenever the operator wants that and the native gates
+     * allow it; capture never publishes measurements taken before it started.
+     */
+    private void ensureCapture() {
+        if (!preferences.sendMeasurements() || captureActive || !withBinocular || !ble.ready() || !hostReady) return;
+        long now = System.currentTimeMillis();
+        if (now - lastCaptureAttemptMs < CAPTURE_RETRY_MS) return;
+        lastCaptureAttemptMs = now;
+        if (!colocationConfirmed) call(command("confirmColocation", "evidenceId", "operator confirmed at connect"));
+        JSONObject result = call(command("startCapture")).optJSONObject("result");
+        if (result != null && result.optBoolean("captureStarted")) {
+            Log.i(TAG, "Measurements now go to REM");
+            status = "Measurements now go to REM as markers";
+        } else if (result != null) {
+            Log.i(TAG, "Capture not started: " + result.optString("reason"));
+        }
     }
     private void scheduleTick() {
         handler.removeCallbacks(tick);
         if (host != null && transport != null) handler.post(tick);
-    }
-    /** The operator attests that this phone, whose fix REM reports, is at the binocular. */
-    void confirmColocationFromUi(String evidence) {
-        if (!ble.ready() || host == null) { status = "Connect the selected device and REM first"; return; }
-        JSONObject response = call(command("confirmColocation", "evidenceId", evidence));
-        status = response.optBoolean("ok")
-            ? "Co-location confirmed. Share points with this plugin from REM's marker sheet to display them"
-            : "Co-location confirmation rejected; inspect native status";
-    }
-    /** Explicit, connection-scoped capture; never persisted and never restored. */
-    void startCaptureFromUi() {
-        if (!ble.ready() || host == null) { status = "Connect the selected device and REM first"; return; }
-        if (!colocationConfirmed) { status = "Confirm the phone is at the binocular before starting capture"; return; }
-        JSONObject response = call(command("startCapture"));
-        JSONObject result = response.optJSONObject("result");
-        if (result != null && result.optBoolean("captureStarted")) {
-            status = "Capture started. Each new measurement becomes a shared REM marker; earlier measurements are not published";
-        } else {
-            status = "Capture not started: " + (result == null ? "native request rejected" : result.optString("reason"));
-        }
-    }
-    void stopCaptureFromUi() {
-        call(command("stopCapture"));
-        status = "Capture stopped. Measurements stay raw and local";
-    }
-    void clearColocationFromUi() {
-        authorizedSessions.clear();
-                cancelWrites("cancelled");
-        call(command("clearColocation"));
-        status = "Co-location confirmation withdrawn. Read-only observation remains active";
     }
     /** An empty session ID stops every display session; otherwise only that one. */
     void stopSyncFromUi(String sessionId) {
@@ -265,7 +307,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
         status = "REM host session ended; reconnect explicitly";
     }
     private JSONObject state() throws JSONException {
-        return new JSONObject().put("status", status).put("deviceAlias", preferences.alias())
+        return new JSONObject().put("status", describe()).put("deviceAlias", preferences.alias())
             .put("connected", ble.ready()).put("writeCapacity", ble.ready() ? ble.capacity() : 0)
             .put("authorizedSessions", new JSONArray(authorizedSessions)).put("sessions", sessionsSummary)
             .put("colocationConfirmed", colocationConfirmed).put("captureActive", captureActive).put("captureStatus", captureSummary)
@@ -281,6 +323,7 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
             lastNativeResult = response.toString();
             mirrorStatus(response);
             if (!response.optBoolean("ok")) {
+                Log.w(TAG, command.optString("cmd") + " failed: " + response.optJSONObject("error"));
                 authorizedSessions.clear();
                 discardWrites();
                 status = response.optJSONObject("error") == null ? "Native request rejected" : response.getJSONObject("error").optString("message");
@@ -304,11 +347,39 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
         if (capture == null) return;
         sessionsSummary = describeSessions(state);
         colocationConfirmed = state.optBoolean("colocationConfirmed");
+        hostReady = state.optBoolean("hostReady");
+        JSONArray sessions = state.optJSONArray("sessions");
+        displayedMarkers = 0;
+        for (int i = 0; sessions != null && i < sessions.length(); i++) {
+            JSONObject entry = sessions.optJSONObject(i);
+            JSONArray selected = entry == null ? null : entry.optJSONArray("selected");
+            displayedMarkers += selected == null ? 0 : selected.length();
+        }
+        JSONArray observations = state.optJSONArray("observations");
+        if (observations != null && observations.length() > 0) {
+            JSONObject last = observations.optJSONObject(observations.length() - 1);
+            JSONObject raw = last == null ? null : last.optJSONObject("record") == null ? null : last.optJSONObject("record").optJSONObject("raw");
+            JSONObject outcome = last == null ? null : last.optJSONObject("host");
+            if (raw != null) {
+                lastMeasurement = raw.optInt("distance") + " m, " + raw.optInt("compass") + "\u00b0 \u2014 " + describeOutcome(outcome);
+            }
+        }
         captureActive = capture.optBoolean("active");
         JSONObject session = capture.optJSONObject("session");
         if (captureActive && session != null) captureSummary = "Capture active (" + session.optString("nonce") + ")";
         else if (capture.isNull("lastEnded")) captureSummary = "Capture not started";
         else captureSummary = "Capture stopped: " + capture.optString("lastEnded");
+    }
+    private static String describeOutcome(JSONObject outcome) {
+        if (outcome == null) return "";
+        switch (outcome.optString("state")) {
+            case "created": return "REM marker created";
+            case "alreadyExisted": return "already in REM";
+            case "observerRequested": case "createRequested": case "replayRequested": return "sending to REM";
+            case "rejected": return "REM refused it (" + outcome.optString("code") + ")";
+            case "unknown": return "REM did not answer";
+            default: return "kept on this phone (" + outcome.optString("reason") + ")";
+        }
     }
     /** One line per session: slots, then transport, reply and operator display confirmation. */
     private static String describeSessions(JSONObject state) {
@@ -376,18 +447,23 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
                     ble.close("Write queue rejected an operation");
                 }
                 break;
-            case "status": status = action.optString("message", action.toString()); break;
+            case "status":
+                status = action.optString("message", action.toString());
+                Log.i(TAG, "Status: " + status);
+                break;
             case "sessionAuthorized":
                 // REM's operator-started session authorizes writes for this connection only.
                 if (ble.ready() && connectionId.equals(action.optString("connectionId"))) {
                     String authorized = action.getString("sessionId");
                     authorizedSessions.add(authorized);
+                    Log.i(TAG, "Showing REM session " + authorized + " on the Binox");
                     status = "REM session " + authorized + " authorized for display writes";
                 }
                 break;
             case "sessionEnded":
                 // A frame of that session already on the radio completes and is ignored natively.
                 authorizedSessions.remove(action.getString("sessionId"));
+                Log.i(TAG, "REM session " + action.getString("sessionId") + " ended: " + action.optString("reason"));
                 status = "REM session " + action.getString("sessionId") + " ended: " + action.optString("reason")
                     + ". Its slots are released; the device display is not cleared";
                 break;
@@ -463,7 +539,15 @@ public final class AtnPluginService extends RemPluginService implements BleTrans
                 .put("writeCharacteristic", BleTransport.SEND.toString());
         } catch (JSONException ignored) { }
         call(request);
-        status = "Read-only notifications active; ATT write capacity " + capacity;
+        Log.i(TAG, "Binox connected, write capacity " + capacity);
+        if (withBinocular) {
+            call(command("confirmColocation", "evidenceId", "operator confirmed at connect"));
+            status = "Binox connected. Take a measurement to send it to REM; markers you share in REM appear on the Binox";
+        } else {
+            status = "Binox connected. Measurements stay on this phone because it is not with the binocular";
+        }
+        lastCaptureAttemptMs = 0;
+        ensureCapture();
     }
     @Override public void notification(byte[] bytes, long timestampMs, java.util.UUID characteristic) {
         JSONObject request = command("notification", "bytes", unsigned(bytes));

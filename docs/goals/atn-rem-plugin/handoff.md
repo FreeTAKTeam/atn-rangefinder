@@ -8,7 +8,8 @@ Plan: `plan.md` in this directory. Status and evidence: `../../implementation-st
 | 2. Automatic measurement capture | implemented, software-verified 2026-10-17 (synthetic tests, JNI smoke, Android build with a synthetic host fingerprint; no real REM host or hardware) | `crates/atn-adapter/src/{config.rs,runtime.rs,runtime/{control,observations,host}.rs}`, `crates/atn-adapter/tests/exchange.rs`, `android/app/src/main/java/org/freetak/atn/{AtnPluginService,SettingsActivity}.java`, `docs/map-contract.md` |
 | 3. Selected-point synchronization | implemented, software-verified 2026-10-17 (synthetic tests, JNI smoke, Android build with a synthetic host fingerprint; no real REM host or hardware) | `crates/atn-adapter/src/{config.rs,runtime.rs,runtime/{sessions,control,host,observations}.rs}`, `crates/atn-domain/src/session.rs` (read-only accessors), `crates/atn-adapter/tests/exchange.rs`, `android/app/src/main/{AndroidManifest.xml,java/org/freetak/atn/AtnPluginService.java,java/org/freetak/atn/SettingsActivity.java}`, `docs/map-contract.md` |
 | 4. Bluetooth and goTenna compatibility | implemented and documented 2026-10-17 (code review, synthetic tests, JNI smoke, Android build; no hardware) | `docs/radio-coexistence.md`, `docs/goals/gotenna-plugin/architecture.md`, `android/app/src/main/java/org/freetak/atn/{BleTransport,AtnPluginService}.java`, `crates/atn-adapter/src/runtime/{control,observations,sessions}.rs` |
-| Hardware qualification | not performed (deferred by the user) | checklist: `qualification.md` in this directory |
+| Operator simplification | implemented 2026-10-18; installed on the operator's Pixel 7 with REM 1.5.1 | `crates/atn-adapter/src/{binox4k-defaults.json,config.rs}`, `android/app/src/main/java/org/freetak/atn/{SettingsActivity,AtnPluginService,PluginPreferences}.java`, `AGENTS.md`, `docs/configuration.md` |
+| Hardware qualification | partly performed 2026-10-18 (BLE connect, measurement decoding against the display); the rest open | checklist: `qualification.md` in this directory |
 
 Decisions taken in Stage 1:
 
@@ -65,6 +66,24 @@ Decisions taken in Stage 3:
   `PluginCoordinator.java`) is sent once per rejected session and is fail-soft.
 - `setIcon`/`confirmDisplay` now require `sessionId`; refusing an unknown session/object answers
   `accepted:false` without ending sessions (previously any refusal ended the single session).
+
+Decisions taken in the operator simplification (2026-10-18):
+
+- The user's rule for all projects is convention over configuration, and the main target is the
+  user's own Binox 4K. `AGENTS.md` now says so; it replaces "operational policies must be explicit
+  configuration".
+- One embedded defaults file (`binox4k-defaults.json`) is the single source; partial JSON
+  overrides merge onto it in Rust (`AdapterConfig::resolve`, native `resolveConfig`, `configure`
+  without `config`). Android reads Bluetooth limits from the effective configuration.
+- The operator flow is Scan → tap Binox → "Is this phone with the binocular?". Yes confirms
+  co-location for that connection and keeps capture running while "send measurements" is on; the
+  Rust gates are unchanged and satisfied by the defaults. Typed evidence boxes, Start/Stop capture
+  and JSON policy editors moved out of the main flow.
+- North reference, pitch sign, range type, display slots and firmware are defaults marked "to
+  confirm", not blockers.
+- Diagnostics: the service logs REM events and decisions under `AtnPlugin`. The first REM share
+  on the device never reached the plugin (no session listed, no rejection recorded); the cause is
+  open and should be retested with these logs.
 
 Decisions taken in Stage 4:
 

@@ -3,7 +3,7 @@ package org.freetak.atn;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-/** Required, operator-configured transport policy. No device identifiers are exported. */
+/** Bluetooth timing and size limits, taken from the effective configuration. */
 final class TransportSettings {
     final int requestMtu;
     final int maxQueuedWrites;

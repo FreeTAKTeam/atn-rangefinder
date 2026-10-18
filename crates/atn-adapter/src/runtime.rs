@@ -296,6 +296,9 @@ impl Adapter {
                 self.transfer(cmd, v, now, actions)
             }
             "status" => Ok(self.status()),
+            // Effective configuration (defaults plus optional overrides),
+            // without applying it; lets the platform read transport limits.
+            "resolveConfig" => Ok(json!({"config":AdapterConfig::resolve(v.get("config"))?})),
             _ => Err(format!("unknown command {cmd}")),
         }
     }

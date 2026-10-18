@@ -1,6 +1,12 @@
 use atn_domain::{EligibilityPolicy, MarkerPitchPolicy, SemanticsPolicy};
 use atn_protocol::PngLimits;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// Built-in defaults for the main target, the operator's own ATN Binox 4K
+/// (convention over configuration). Values marked "to confirm" in the file's
+/// evidence strings came from one field test and do not block operation.
+pub const BINOX_4K_DEFAULTS: &str = include_str!("binox4k-defaults.json");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -83,6 +89,32 @@ impl HostMarkerPolicy {
 }
 
 impl AdapterConfig {
+    /// The built-in Binox 4K configuration as JSON.
+    ///
+    /// # Errors
+    /// Fails only if the embedded defaults are malformed (covered by tests).
+    pub fn defaults_json() -> Result<Value, String> {
+        serde_json::from_str(BINOX_4K_DEFAULTS).map_err(|e| e.to_string())
+    }
+
+    /// Built-in defaults with an optional partial override merged on top:
+    /// objects merge key by key, any other value replaces the default.
+    /// Unknown keys are still rejected and the result is validated.
+    ///
+    /// # Errors
+    /// Rejects a non-object override, unknown fields and invalid values.
+    pub fn resolve(overrides: Option<&Value>) -> Result<Self, String> {
+        let mut merged = Self::defaults_json()?;
+        match overrides {
+            None | Some(Value::Null) => {}
+            Some(value @ Value::Object(_)) => merge(&mut merged, value),
+            Some(_) => return Err("configuration override must be a JSON object".into()),
+        }
+        let config: Self = serde_json::from_value(merged).map_err(|e| e.to_string())?;
+        config.validate()?;
+        Ok(config)
+    }
+
     /// # Errors
     /// Rejects missing, zero, nonfinite, or unrepresentable configuration.
     pub fn validate(&self) -> Result<(), String> {
@@ -177,5 +209,21 @@ impl AdapterConfig {
             return Err("verified device profile requires evidence".into());
         }
         Ok(())
+    }
+}
+
+fn merge(base: &mut Value, overrides: &Value) {
+    match (base, overrides) {
+        (Value::Object(base), Value::Object(overrides)) => {
+            for (key, value) in overrides {
+                match base.get_mut(key) {
+                    Some(slot) if slot.is_object() && value.is_object() => merge(slot, value),
+                    _ => {
+                        base.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        (base, value) => *base = value.clone(),
     }
 }

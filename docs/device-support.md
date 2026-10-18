@@ -1,10 +1,10 @@
 # Device and firmware evidence matrix
 
-No model/firmware combination currently has completed physical acceptance in this repository.
+No model/firmware combination has completed physical acceptance yet. The Binox 4K is the main target and the built-in defaults are for it; its partial field evidence is below.
 
 | Model | Evidence | Firmware | Adapter acceptance |
 |---|---|---|---|
-| Binox4k (application model ID 3) | Application discovery behavior in original research | Unverified | Raw protocol implementation only; physical units, north/pitch convention, valid wire bounds and rendering unverified |
+| Binox4k (application model ID 3) | Application discovery behavior in original research; operator field test 2026-10-18 (Pixel 7, REM 1.5.1) | Unrecorded | Main target with built-in defaults. Confirmed: BLE connection without pairing, notifications, 512-byte write capacity, distance 1 raw unit = 1 m (74 m, 818 m) and compass 1 raw unit = 1° (147°) against the display. To confirm: north reference, pitch sign, slant vs horizontal range, display slots, rendering |
 | Binox4t (application model ID 4) | Application discovery behavior in original research | Unverified | Same unresolved physical gates; no inferred cross-firmware compatibility |
 | Synthetic test device | Invented fixture/configuration | Fixture only | Codec, geometry and session tests; not hardware support |
 

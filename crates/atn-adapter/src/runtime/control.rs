@@ -1,7 +1,7 @@
 use super::{
     Adapter, AdapterConfig, Capture, HostOutcome, NOTIFICATION_UUID, OP_SYMBOLS_LIST, Purpose,
-    REQUIRED_API_MINOR, Resolution, SERVICE_UUID, Value, WRITE_UUID, decode, gatt_uuid, integer,
-    json, text,
+    REQUIRED_API_MINOR, Resolution, SERVICE_UUID, Value, WRITE_UUID, gatt_uuid, integer, json,
+    text,
 };
 
 impl Adapter {
@@ -144,7 +144,10 @@ impl Adapter {
         self.host_ready = false;
         self.confirmed_symbol = None;
         if !self.api_supported() {
-            actions.push(json!({"kind":"status","message":format!("REM plugin API 1.{REQUIRED_API_MINOR} required; map exchange unavailable")}));
+            // Before REM has started the plugin there is nothing to report yet.
+            if self.host_started {
+                actions.push(json!({"kind":"status","message":format!("REM plugin API 1.{REQUIRED_API_MINOR} required; map exchange unavailable")}));
+            }
             return Ok(());
         }
         if self.config.is_none() {
@@ -162,8 +165,8 @@ impl Adapter {
     ) -> Result<Value, String> {
         match cmd {
             "configure" => {
-                let config: AdapterConfig = decode(v, "config")?;
-                config.validate()?;
+                // Missing settings come from the built-in Binox 4K defaults.
+                let config = AdapterConfig::resolve(v.get("config"))?;
                 self.end_capture("configuration changed", actions);
                 self.end_all_displays("configuration changed", true, now, actions);
                 self.drop_observation_requests("configuration changed before host answered");
@@ -175,7 +178,7 @@ impl Adapter {
                 self.config = Some(config);
                 actions.push(json!({"kind":"cancelWrites"}));
                 self.negotiate(now, actions)?;
-                Ok(json!({"configured":true}))
+                Ok(json!({"configured":true,"config":self.config}))
             }
             "hostStarted" => {
                 self.end_capture("host restarted", actions);

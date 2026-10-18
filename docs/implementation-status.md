@@ -240,3 +240,32 @@ Checks on 2026-10-18: `llvm-readelf -lW` (NDK 27.0.12077973) on the arm64-v8a
 `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (105 tests),
 `bash scripts/test-jni.sh` (PASS) and `scripts/build-android.sh --offline` (4 JVM tests, lint with
 no issues, synthetic host fingerprint) passed. Not checked: loading on a 16 KB-page device.
+
+## Operator simplification for the Binox 4K (2026-10-18)
+
+On the operator's Pixel 7 with REM 1.5.1 the plugin bound to REM and connected to the Binox 4K,
+and two measurements decoded correctly (74 m / 147° and 818 m / 139°, distance and bearing matched
+the display). But the operator flow needed typed JSON policies, typed co-location evidence and a
+separate Start capture, and was judged unusable. A REM share also never reached the plugin.
+
+- Convention over configuration (`AGENTS.md`): built-in Binox 4K defaults in
+  `crates/atn-adapter/src/binox4k-defaults.json`, partial overrides merged by
+  `AdapterConfig::resolve`, native `configure` without `config` and new `resolveConfig`.
+  `configure` returns the effective configuration. The "API 1.3 required" status is no longer
+  emitted before REM starts the plugin.
+- Android: one screen with a plain status block (REM, Binox, measurements, what is on the
+  Binox, last measurement), Scan → tap Binox → "Is this phone with the binocular?", automatic
+  capture behind a "send measurements" switch (default on), and everything else under
+  **Show advanced**. Legacy `transport`/`config` preferences are removed on first start. The
+  service logs REM events and decisions under `AtnPlugin`.
+- `docs/configuration.md`, `android/README.md`, `docs/device-support.md` (Binox 4K field
+  evidence) and the handoff were updated.
+
+Checks on 2026-10-18: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D
+warnings`, `cargo test --workspace` (107 tests; 2 new for defaults and partial overrides, 1
+adjusted because an omitted value now takes its default) and `bash scripts/test-jni.sh` (PASS)
+passed. `scripts/build-android.sh --offline` passed (4 JVM tests, lint with no issues); the APK
+installed on the Pixel was built with REM 1.5.1's real host certificate fingerprint (not
+committed), and REM bound it (`AtnPlugin: REM bound, plugin API 1.3`). Not yet re-tested on the
+device after this change: Connect with the new question, automatic capture creating a REM marker,
+and a REM share reaching the Binox.

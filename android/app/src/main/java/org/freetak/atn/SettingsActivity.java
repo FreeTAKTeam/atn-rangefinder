@@ -12,14 +12,15 @@ import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanFilter;
 import android.bluetooth.le.ScanResult;
 import android.bluetooth.le.ScanSettings;
-import android.content.pm.PackageManager;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelUuid;
 import android.text.InputType;
+import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -27,19 +28,21 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
 import network.reticulum.emergency.plugin.api.PluginProtocol;
-import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-/** Explicit local device selection, permission UI, editable policy and session authorization. */
+/**
+ * Operator screen: pick the Binox, connect, and everything else happens on its own. Engineering
+ * settings, icons and display confirmation live under Advanced.
+ */
 public final class SettingsActivity extends Activity {
     private static final int PERMISSIONS = 71;
     private static final int ICON = 72;
@@ -47,21 +50,19 @@ public final class SettingsActivity extends Activity {
     private final Map<String, BluetoothDevice> devices = new LinkedHashMap<>();
     private PluginPreferences preferences;
     private LinearLayout layout;
+    private LinearLayout advanced;
     private LinearLayout discovered;
     private TextView status;
     private TextView alias;
-    private TextView details;
-    private TextView capture;
     private TextView sessions;
+    private TextView details;
+    private EditText overrides;
     private EditText sessionId;
-    private EditText transport;
-    private EditText config;
-    private EditText selection;
-    private EditText confirmation;
-    private EditText confirmationEvidence;
     private EditText iconPle;
     private EditText markerType;
     private EditText markerColor;
+    private EditText confirmation;
+    private EditText confirmationEvidence;
     private CheckBox scanAll;
     private String requestedIconPle;
     private String requestedIconSession;
@@ -70,10 +71,9 @@ public final class SettingsActivity extends Activity {
     private final Runnable scanTimeout = this::stopScan;
     private final Runnable refresh = new Runnable() {
         @Override public void run() {
-            status.setText(AtnPluginService.summary());
-            details.setText(AtnPluginService.nativeResult());
-            capture.setText(AtnPluginService.captureStatus());
+            status.setText(AtnPluginService.statusLine());
             sessions.setText(AtnPluginService.sessionsStatus());
+            if (advanced.getVisibility() == View.VISIBLE) details.setText(AtnPluginService.nativeResult());
             handler.postDelayed(this, 1000L);
         }
     };
@@ -81,122 +81,143 @@ public final class SettingsActivity extends Activity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         preferences = new PluginPreferences(this);
-        setTitle("ATN Rangefinder settings");
+        setTitle("ATN Rangefinder");
         ScrollView scroll = new ScrollView(this);
         layout = new LinearLayout(this); layout.setOrientation(LinearLayout.VERTICAL); layout.setPadding(24, 24, 24, 24);
         scroll.addView(layout); setContentView(scroll);
-        text("ATN Rangefinder", 24);
-        text("Enable and trust this plugin in REM 1.5.1 or later (plugin API 1.3) and grant its map capabilities. Configure policies below, choose a device, then connect. A connection starts read-only. After you confirm co-location and start capture, each new eligible measurement becomes a shared REM marker; points you share with this plugin from a REM marker sheet are displayed on the device.", 16);
-        status = text("", 16);
-        alias = text(preferences.alias(), 16);
-        button("Grant Bluetooth permissions", this::requestBluetoothPermissions);
-        scanAll = new CheckBox(this); scanAll.setText(R.string.scan_all); layout.addView(scanAll);
-        button("Scan and choose a device", this::startScan);
+        text(layout, "ATN Rangefinder", 24);
+        status = text(layout, "", 18);
+
+        text(layout, "Binox", 20);
+        alias = text(layout, preferences.alias(), 16);
+        button(layout, "Scan for Binox", this::startScan);
         discovered = new LinearLayout(this); discovered.setOrientation(LinearLayout.VERTICAL); layout.addView(discovered);
-        button("Connect selected device (read-only)", () -> AtnPluginService.ui(AtnPluginService::connectFromUi));
-        button("Disconnect", () -> AtnPluginService.ui(AtnPluginService::disconnectFromUi));
-        text("Transport policy JSON", 20);
-        text("Required: requestMtu, connectTimeoutMs, writeTimeoutMs, hostRequestTimeoutMs, maxPendingHostRequests, maxQueuedWrites, scanTimeoutMs. The pending-request bound also bounds the discovered-device list. Values are choices for this installation; no device policy is assumed.", 16);
-        transport = editor("{}", 7);
-        try { transport.setText(preferences.transportJson().toString(2)); } catch (JSONException ignored) { }
-        button("Save transport policy", () -> {
-            try {
-                JSONObject json = object(transport);
-                preferences.saveTransport(json);
-                message("Transport saved. Disconnect and reconnect to apply changed transport settings.");
-            } catch (JSONException error) { message(error.getMessage()); }
+        button(layout, "Connect", this::askAndConnect);
+        button(layout, "Disconnect", () -> AtnPluginService.ui(AtnPluginService::disconnectFromUi));
+        text(layout, "Do not pair the Binox in Android's Bluetooth settings; this screen connects to it directly.", 14);
+
+        CheckBox send = new CheckBox(this);
+        send.setText(R.string.send_measurements);
+        send.setChecked(preferences.sendMeasurements());
+        send.setOnCheckedChangeListener((view, checked) -> AtnPluginService.ui(service -> service.setSendMeasurementsFromUi(checked)));
+        layout.addView(send);
+
+        text(layout, "On the Binox", 20);
+        text(layout, "To show a REM marker on the Binox, open the marker in REM and choose Share with ATN Rangefinder.", 14);
+        sessions = text(layout, "", 14);
+        button(layout, "Stop showing REM markers", () -> AtnPluginService.ui(service -> service.stopSyncFromUi("")));
+
+        Button toggle = button(layout, "Show advanced", null);
+        advanced = new LinearLayout(this); advanced.setOrientation(LinearLayout.VERTICAL); advanced.setVisibility(View.GONE);
+        layout.addView(advanced);
+        toggle.setOnClickListener(view -> {
+            boolean show = advanced.getVisibility() != View.VISIBLE;
+            advanced.setVisibility(show ? View.VISIBLE : View.GONE);
+            toggle.setText(show ? "Hide advanced" : "Show advanced");
         });
-        text("Device semantics and map policy JSON", 20);
-        text("Paste an explicit configuration matching docs/configuration.md and examples/synthetic-config.json, including hostMarker (REM catalog symbol) and slotPool. Unsupported model/firmware, stale or uncertain observer fixes and unknown reference metadata block mapping and device writes. Saving changes stops any display session.", 16);
-        config = editor("{}", 12);
-        try { config.setText(preferences.config().toString(2)); } catch (JSONException ignored) { }
-        button("Validate and save map policy", this::saveConfig);
-        text("Observer co-location", 20);
-        text("REM reports this phone's own position as the observer. Confirm, for this connection only, that the phone is beside the binocular; describe the evidence. Without it measurements stay raw and shared points are rejected.", 16);
-        selection = editor("", 2);
-        button("Confirm phone is at the binocular", () -> {
-            String evidence = selection.getText().toString().trim();
-            if (evidence.isEmpty() || evidence.length() > 64) { message("Describe the co-location evidence in up to 64 characters"); return; }
-            AtnPluginService.ui(service -> service.confirmColocationFromUi(evidence));
+        buildAdvanced();
+    }
+
+    /** The one question: is this phone with the binocular? Its position stands in for the Binox's. */
+    private void askAndConnect() {
+        if (AtnPluginService.statusLine().startsWith("REM: plugin not running")) {
+            message("Enable ATN Rangefinder in REM's plugin settings and start the REM node first");
+            return;
+        }
+        new AlertDialog.Builder(this)
+            .setMessage("Is this phone with the binocular?\n\nREM uses the phone's position to place measured targets and to aim shared markers on the Binox.")
+            .setPositiveButton("Yes", (dialog, which) -> AtnPluginService.ui(service -> service.connectFromUi(true)))
+            .setNegativeButton("No", (dialog, which) -> AtnPluginService.ui(service -> service.connectFromUi(false)))
+            .show();
+    }
+
+    private void buildAdvanced() {
+        text(advanced, "Configuration override", 20);
+        text(advanced, "Everything defaults to the Binox 4K. Enter only what should differ, as JSON, for example {\"color\":2} or {\"transport\":{\"scanTimeoutMs\":8000}}. Leave {} for the defaults.", 14);
+        overrides = editor(advanced, "{}", 3);
+        try { overrides.setText(preferences.overrides().toString(2)); } catch (JSONException ignored) { }
+        button(advanced, "Save override", this::saveOverrides);
+        button(advanced, "Show effective configuration", () -> {
+            try { message(preferences.effectiveConfig().toString(2)); }
+            catch (JSONException error) { message(error.getMessage()); }
         });
-        button("Withdraw co-location confirmation", () -> AtnPluginService.ui(AtnPluginService::clearColocationFromUi));
-        text("Measurement capture", 20);
-        text("Start capture after confirming co-location. While capture runs, each new measurement from this connection becomes one shared REM marker. Measurements taken before Start stay local and are never published. Capture ends on Stop, disconnect, REM host restart, a configuration change, withdrawn co-location or revoked map capability, and is never restored.", 16);
-        capture = text(AtnPluginService.captureStatus(), 16);
-        button("Start capture", () -> AtnPluginService.ui(AtnPluginService::startCaptureFromUi));
-        button("Stop capture", () -> AtnPluginService.ui(AtnPluginService::stopCaptureFromUi));
-        text("Display sessions start from REM: open a marker's details sheet and choose Share with ATN Rangefinder. Up to four sessions run at once; each takes the first free slots of the configured slot pool in REM's selection order. A selection that does not fit is rejected and stopped, and REM shows the reason as a notification. Releasing a slot does not clear the device display. Stop a session here or with REM's Stop control.", 16);
-        sessions = text(AtnPluginService.sessionsStatus(), 14);
-        text("REM session ID (for stop, icon and display confirmation; leave empty to stop all sessions)", 16);
-        sessionId = editor("", 1);
-        button("Stop display session", () -> {
+        button(advanced, "Reset to Binox 4K defaults", () -> { overrides.setText("{}"); saveOverrides(); });
+        scanAll = new CheckBox(this); scanAll.setText(R.string.scan_all); advanced.addView(scanAll);
+        button(advanced, "Grant Bluetooth permissions", this::requestBluetoothPermissions);
+
+        text(advanced, "REM session ID (for stopping one session, icons and display confirmation)", 16);
+        sessionId = editor(advanced, "", 1);
+        button(advanced, "Stop this display session", () -> {
             String id = sessionId.getText().toString().trim();
+            if (id.isEmpty()) { message("Enter a REM session ID; it is listed under On the Binox"); return; }
             AtnPluginService.ui(service -> service.stopSyncFromUi(id));
         });
-        text("Style for the authorized selected set", 20);
-        text("Marker type (0 or 1) and color (0 red, 1 orange, 2 yellow, 3 green, 4 blue, 5 gray, 6 dark gray, 7 offline gray). A style change refreshes only the authorized selected set.", 16);
-        markerType = editor("", 1);
-        markerColor = editor("", 1);
-        button("Apply selected-set style", () -> {
+
+        text(advanced, "Marker style on the Binox", 16);
+        text(advanced, "Type 0 or 1; colour 0 red, 1 orange, 2 yellow, 3 green, 4 blue, 5 gray, 6 dark gray, 7 offline gray.", 14);
+        markerType = editor(advanced, "", 1);
+        markerColor = editor(advanced, "", 1);
+        button(advanced, "Apply style", () -> {
             try {
                 int type = Integer.parseInt(markerType.getText().toString().trim());
                 int color = Integer.parseInt(markerColor.getText().toString().trim());
-                if (type < 0 || type > 1 || color < 0 || color > 7) { message("Enter a supported marker type and color"); return; }
+                if (type < 0 || type > 1 || color < 0 || color > 7) { message("Enter a supported marker type and colour"); return; }
                 AtnPluginService.ui(service -> service.styleFromUi(type, color));
-            } catch (NumberFormatException error) { message("Enter marker type and color as integers"); }
+            } catch (NumberFormatException error) { message("Enter marker type and colour as numbers"); }
         });
-        text("Optional local PNG icon", 20);
-        text("Enter the REM session ID above and the object_destination_hash of a point in that session. Choose a PNG file within your configured icon bounds. Position and icon are separate operations.", 16);
-        iconPle = editor("", 1);
-        button("Choose a PNG and send to selected PLE", () -> {
+
+        text(advanced, "Icon for a shared marker (40×40 PNG)", 16);
+        text(advanced, "Enter the REM session ID above and the marker's object_destination_hash.", 14);
+        iconPle = editor(advanced, "", 1);
+        button(advanced, "Choose PNG and send", () -> {
             requestedIconPle = iconPle.getText().toString().trim();
             requestedIconSession = sessionId.getText().toString().trim();
-            if (requestedIconPle.isEmpty() || requestedIconSession.isEmpty()) { message("Enter the REM session ID and a selected PLE ID"); return; }
+            if (requestedIconPle.isEmpty() || requestedIconSession.isEmpty()) { message("Enter the REM session ID and the marker ID"); return; }
             startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/png").addCategory(Intent.CATEGORY_OPENABLE), ICON);
         });
-        text("Confirm device display (after looking at the device)", 20);
-        text("Transport completion and reply bytes do not prove display success. Enter the REM session ID above and the operationId from native status only after observing the expected marker on the selected device.", 16);
-        confirmation = editor("", 1);
-        text("Describe the display evidence you observed", 16);
-        confirmationEvidence = editor("", 2);
-        button("Record observed display confirmation", () -> {
+
+        text(advanced, "Record that the Binox showed a marker", 16);
+        text(advanced, "Delivery to the Binox does not prove it is displayed. After looking at the Binox, enter the REM session ID above, the operation ID and what you saw.", 14);
+        confirmation = editor(advanced, "", 1);
+        confirmationEvidence = editor(advanced, "", 2);
+        button(advanced, "Record display confirmation", () -> {
             try {
                 long operationId = Long.parseLong(confirmation.getText().toString().trim());
                 String evidence = confirmationEvidence.getText().toString().trim();
-                if (operationId < 0 || evidence.isEmpty()) { message("Enter a valid operation ID and observed evidence"); return; }
                 String session = sessionId.getText().toString().trim();
-                if (session.isEmpty()) { message("Enter the REM session ID the operation belongs to"); return; }
+                if (operationId < 0 || evidence.isEmpty() || session.isEmpty()) { message("Enter session ID, operation ID and what you saw"); return; }
                 AtnPluginService.ui(service -> service.confirmFromUi(session, operationId, evidence));
-            } catch (NumberFormatException error) { message("Operation ID must be a nonnegative integer"); }
+            } catch (NumberFormatException error) { message("Operation ID must be a number"); }
         });
-        text("Native status and local raw observation details", 20);
-        details = text("", 12);
+
+        text(advanced, "Native status", 16);
+        details = text(advanced, "", 12);
     }
-    private void saveConfig() {
+
+    private void saveOverrides() {
         try {
-            JSONObject json = object(config);
-            // Use the saved transport settings, so JNI and the platform share one explicit policy.
-            json.put("transport", preferences.transportJson());
-            new TransportSettings(json.getJSONObject("transport"));
-            if (!NativeCore.available()) { message("Native adapter is missing from this APK"); return; }
+            String raw = overrides.getText().toString().trim();
+            PluginProtocol.requireJsonSize(raw.isEmpty() ? "{}" : raw, "Override");
+            JSONObject json = new JSONObject(raw.isEmpty() ? "{}" : raw);
+            PluginPreferences.resolve(json); // validates against the defaults before saving
+            if (AtnPluginService.statusLine().startsWith("REM: plugin not running")) {
+                preferences.saveOverrides(json);
+                message("Override saved; it applies when REM starts the plugin");
+                return;
+            }
             AtnPluginService.ui(service -> {
                 JSONObject response = service.configureFromUi(json);
-                message(response.optBoolean("ok") ? "Configuration validated and saved; synchronization stopped" : response.toString());
+                message(response.optBoolean("ok") ? "Override saved" : "Override rejected: " + response.optJSONObject("error"));
             });
-            // Configuration may be prepared before REM starts; all JNI calls run on the main thread.
-            if (AtnPluginService.summary().startsWith("Plugin not running")) {
-                JSONObject response = new JSONObject(NativeCore.dispatch(AtnPluginService.command("configure", "config", json).toString()));
-                if (response.optBoolean("ok")) preferences.saveConfig(json);
-                message(response.toString());
-            }
-        } catch (JSONException error) { message(error.getMessage()); }
+        } catch (JSONException error) { message("Override rejected: " + error.getMessage()); }
     }
-    private JSONObject object(EditText view) throws JSONException {
-        String raw = view.getText().toString();
-        PluginProtocol.requireJsonSize(raw, "Configuration");
-        return new JSONObject(raw);
-    }
+
     private void requestBluetoothPermissions() {
+        List<String> missing = missingPermissions();
+        if (missing.isEmpty()) { message("Bluetooth permissions already granted"); return; }
+        requestPermissions(missing.toArray(new String[0]), PERMISSIONS);
+    }
+    private List<String> missingPermissions() {
         List<String> requested = new ArrayList<>();
         if (Build.VERSION.SDK_INT >= 31) {
             requested.add(Manifest.permission.BLUETOOTH_SCAN); requested.add(Manifest.permission.BLUETOOTH_CONNECT);
@@ -204,8 +225,7 @@ public final class SettingsActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 33) requested.add(Manifest.permission.POST_NOTIFICATIONS);
         List<String> missing = new ArrayList<>();
         for (String permission : requested) if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) missing.add(permission);
-        if (missing.isEmpty()) { message("Permissions already granted"); return; }
-        requestPermissions(missing.toArray(new String[0]), PERMISSIONS);
+        return missing;
     }
     private boolean hasScanPermission() {
         String permission = Build.VERSION.SDK_INT >= 31 ? Manifest.permission.BLUETOOTH_SCAN : Manifest.permission.ACCESS_FINE_LOCATION;
@@ -214,33 +234,35 @@ public final class SettingsActivity extends Activity {
     }
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
-        if (requestCode == PERMISSIONS) message(hasScanPermission() ? "Bluetooth permissions granted; choose a device" : "Bluetooth permissions denied. Grant them in Android settings before connecting");
+        if (requestCode != PERMISSIONS) return;
+        if (hasScanPermission()) startScan();
+        else message("Bluetooth permission was denied. Allow Nearby devices for ATN Rangefinder in Android settings");
     }
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode != ICON || resultCode != RESULT_OK || data == null || data.getData() == null) return;
         String pleId = requestedIconPle;
         String session = requestedIconSession;
-        if (pleId == null || pleId.isEmpty() || session == null || session.isEmpty()) { message("Icon selection context expired; choose again"); return; }
+        if (pleId == null || pleId.isEmpty() || session == null || session.isEmpty()) { message("Icon selection expired; choose again"); return; }
         new Thread(() -> {
             try {
-                int limit = preferences.config().getJSONObject("pngLimits").getInt("maxEncodedBytes");
+                int limit = preferences.effectiveConfig().getJSONObject("pngLimits").getInt("maxEncodedBytes");
                 // The on-wire icon length is u16; the Rust core additionally validates PNG content.
-                if (limit < 1 || limit > 65_535) throw new JSONException("Configure maxEncodedBytes within the protocol's 16-bit limit");
+                if (limit < 1 || limit > 65_535) throw new JSONException("Icon size limit must fit the protocol's 16-bit length");
                 byte[] owned;
                 try (InputStream input = getContentResolver().openInputStream(data.getData()); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
                     if (input == null) throw new java.io.IOException("PNG file unavailable");
                     byte[] buffer = new byte[Math.min(limit, 4096)];
                     int count;
                     while ((count = input.read(buffer)) != -1) {
-                        if (output.size() + count > limit) throw new java.io.IOException("PNG exceeds configured size bound");
+                        if (output.size() + count > limit) throw new java.io.IOException("PNG exceeds the size limit");
                         output.write(buffer, 0, count);
                     }
                     owned = output.toByteArray();
                 }
                 handler.post(() -> AtnPluginService.ui(service -> service.iconFromUi(session, pleId, owned)));
             } catch (java.io.IOException | JSONException | SecurityException error) {
-                handler.post(() -> message("PNG unavailable or outside configured bounds"));
+                handler.post(() -> message("PNG unavailable or too large"));
             }
         }, "atn-local-icon").start();
     }
@@ -252,22 +274,26 @@ public final class SettingsActivity extends Activity {
             discoveryLimit = settings.maxPendingHostRequests;
             BluetoothManager manager = getSystemService(BluetoothManager.class);
             BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
-            if (adapter == null || !adapter.isEnabled()) { message("Enable Bluetooth in Android settings first"); return; }
+            if (adapter == null || !adapter.isEnabled()) { message("Turn Bluetooth on in Android settings first"); return; }
             scanner = adapter.getBluetoothLeScanner();
-            if (scanner == null) { message("BLE scanning is unavailable"); return; }
+            if (scanner == null) { message("Bluetooth scanning is unavailable on this phone"); return; }
             devices.clear(); discovered.removeAllViews();
             ScanFilter filter = new ScanFilter.Builder().setServiceUuid(new ParcelUuid(BleTransport.SERVICE)).build();
             List<ScanFilter> filters = scanAll.isChecked() ? Collections.emptyList() : Collections.singletonList(filter);
             scanner.startScan(filters, new ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), scanCallback);
             handler.postDelayed(scanTimeout, settings.scanTimeoutMs);
-            message("Scanning. Tap the device you intend to use; no device is selected automatically");
-        } catch (JSONException | SecurityException error) { message("Scanning requires valid transport configuration and Bluetooth permissions"); }
+            alias.setText(R.string.scanning);
+        } catch (JSONException error) {
+            message("Could not read the Bluetooth settings: " + error.getMessage());
+        } catch (SecurityException error) {
+            message("Bluetooth permission is missing; tap Scan for Binox again to grant it");
+        }
     }
     private final ScanCallback scanCallback = new ScanCallback() {
         @Override public void onScanResult(int callbackType, ScanResult result) {
             handler.post(() -> addDevice(result.getDevice()));
         }
-        @Override public void onScanFailed(int code) { handler.post(() -> { stopScan(); message("Android BLE scanning failed: " + code); }); }
+        @Override public void onScanFailed(int code) { handler.post(() -> { stopScan(); message("Bluetooth scan failed (code " + code + ")"); }); }
     };
     @SuppressLint("MissingPermission") private void addDevice(BluetoothDevice device) {
         if (scanner == null) return;
@@ -283,7 +309,8 @@ public final class SettingsActivity extends Activity {
                 AtnPluginService.ui(AtnPluginService::disconnectFromUi);
                 preferences.select(address, name);
                 alias.setText(name);
-                message("Device selected. Connect explicitly to observe notifications");
+                discovered.removeAllViews();
+                askAndConnect();
             });
             discovered.addView(choice);
         } catch (SecurityException error) { stopScan(); message("Bluetooth permission revoked"); }
@@ -292,19 +319,22 @@ public final class SettingsActivity extends Activity {
         handler.removeCallbacks(scanTimeout);
         BluetoothLeScanner previous = scanner; scanner = null;
         if (previous != null) try { previous.stopScan(scanCallback); } catch (SecurityException ignored) { }
+        if (alias != null && getString(R.string.scanning).contentEquals(alias.getText())) alias.setText(preferences.alias());
     }
-    private TextView text(String value, int size) {
+    private TextView text(LinearLayout parent, String value, int size) {
         TextView text = new TextView(this); text.setText(value); text.setTextSize(size); text.setTextIsSelectable(true);
-        layout.addView(text); return text;
+        parent.addView(text); return text;
     }
-    private EditText editor(String value, int lines) {
+    private EditText editor(LinearLayout parent, String value, int lines) {
         EditText editor = new EditText(this); editor.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
         editor.setText(value); editor.setMinLines(lines); editor.setMaxLines(lines + 3);
-        layout.addView(editor, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        parent.addView(editor, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         return editor;
     }
-    private void button(String label, Runnable action) {
-        Button button = new Button(this); button.setText(label); button.setOnClickListener(view -> action.run()); layout.addView(button);
+    private Button button(LinearLayout parent, String label, Runnable action) {
+        Button button = new Button(this); button.setText(label);
+        if (action != null) button.setOnClickListener(view -> action.run());
+        parent.addView(button); return button;
     }
     private void message(String value) { new AlertDialog.Builder(this).setMessage(value).setPositiveButton(android.R.string.ok, null).show(); }
     @Override protected void onResume() { super.onResume(); handler.post(refresh); }
