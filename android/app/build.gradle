@@ -19,6 +19,10 @@ if (!(sdkSha256 ==~ /[0-9a-f]{64}/) || digest != sdkSha256) throw new GradleExce
 if (!(hostPackage ==~ /[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+/)) throw new GradleException('Invalid host package')
 if (!hostFingerprints.split(',').every { it ==~ /[0-9a-f]{64}/ }) throw new GradleException('Host certificate fingerprints must be comma-separated SHA-256 values')
 def nativeLibs = project.findProperty('nativeLibsDir')?.toString()
+// Single source of the plugin version: bump it for every build handed out. It feeds the APK
+// version and the manifest's rem.plugin.version shown in REM.
+def pluginVersion = '0.2.0'
+def (versionMajor, versionMinor, versionPatch) = pluginVersion.tokenize('.').collect { it as int }
 
 android {
     namespace 'org.freetak.atn'
@@ -27,9 +31,9 @@ android {
         applicationId 'org.freetak.atn'
         minSdk 26
         targetSdk 35
-        versionCode 1
-        versionName '0.1.0'
-        manifestPlaceholders = [remHostPackage: hostPackage]
+        versionCode versionMajor * 10000 + versionMinor * 100 + versionPatch
+        versionName pluginVersion
+        manifestPlaceholders = [remHostPackage: hostPackage, pluginVersion: pluginVersion]
         buildConfigField 'String', 'REM_HOST_PACKAGE', '"' + hostPackage + '"'
         buildConfigField 'String', 'REM_HOST_FINGERPRINTS', '"' + hostFingerprints + '"'
         buildConfigField 'String', 'REM_SDK_COMMIT', '"' + sdkCommit + '"'

@@ -85,7 +85,7 @@ public final class SettingsActivity extends Activity {
         ScrollView scroll = new ScrollView(this);
         layout = new LinearLayout(this); layout.setOrientation(LinearLayout.VERTICAL); layout.setPadding(24, 24, 24, 24);
         scroll.addView(layout); setContentView(scroll);
-        text(layout, "ATN Rangefinder", 24);
+        text(layout, "ATN Rangefinder " + BuildConfig.VERSION_NAME, 24);
         status = text(layout, "", 18);
 
         text(layout, "Binox", 20);

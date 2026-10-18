@@ -269,3 +269,9 @@ installed on the Pixel was built with REM 1.5.1's real host certificate fingerpr
 committed), and REM bound it (`AtnPlugin: REM bound, plugin API 1.3`). Not yet re-tested on the
 device after this change: Connect with the new question, automatic capture creating a REM marker,
 and a REM share reaching the Binox.
+
+Plugin version 0.2.0 (2026-10-18): the version now has a single source, `pluginVersion` in
+`android/app/build.gradle`, which sets `versionName`, a derived `versionCode` (major·10000 +
+minor·100 + patch = 200) and the manifest's `rem.plugin.version`. The settings screen shows it in
+its title. It must be bumped for every build that is handed out; earlier builds all reported
+0.1.0. Installed on the Pixel 7 as 0.2.0 / 200 (lint clean, 4 JVM tests).
