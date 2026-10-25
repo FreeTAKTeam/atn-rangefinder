@@ -670,10 +670,7 @@ fn icon_frames_are_serialized_and_do_not_expect_per_fragment_acknowledgement() {
         .enqueue_icon("selected", png, 64, PngLimits::default(), NOW)
         .unwrap();
     let mut count = 0;
-    loop {
-        let Some(frame) = session.next_write(NOW).unwrap() else {
-            break;
-        };
+    while let Some(frame) = session.next_write(NOW).unwrap() {
         count += 1;
         assert_eq!(frame.frame_number, count);
         assert!(frame.bytes.len() <= 64);
