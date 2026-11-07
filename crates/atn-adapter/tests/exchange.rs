@@ -368,7 +368,7 @@ fn ineligible_observer_retains_raw_without_marker_creation() {
         snapshot(0.0, 0),
     );
     assert_eq!(v["ok"], true);
-    assert!(requests(&v, "map.markers.create").is_empty());
+    assert_eq!(requests(&v, "map.markers.create").len(), 0);
     assert_eq!(v["result"]["observations"][0]["host"]["state"], "retained");
     let v = observe(&mut a);
     let v = respond(
@@ -412,7 +412,7 @@ fn unconfirmed_colocation_blocks_creation_and_rejects_sessions() {
     assert_eq!(v["result"]["sessions"], json!([]));
     // The rejected ID is terminal even if REM re-reports it.
     let v = started(&mut a, "shared-early", &[object("p", 0.001, T1)]);
-    assert!(requests(&v, "map.session.stop").is_empty());
+    assert_eq!(requests(&v, "map.session.stop").len(), 0);
     assert!(!has_action(&v, "sessionAuthorized"));
 }
 
@@ -509,7 +509,7 @@ fn second_session_gets_its_own_slots_and_existing_session_is_untouched() {
     let first = sync(&mut a);
     let w = write(&first);
     let v = started(&mut a, "second", &[object("other", 0.001, T1)]);
-    assert!(requests(&v, "map.session.stop").is_empty());
+    assert_eq!(requests(&v, "map.session.stop").len(), 0);
     assert!(has_action(&v, "sessionAuthorized"));
     assert!(!has_action(&v, "cancelWrites"));
     assert!(!has_action(&v, "write")); // the first session's frame is in flight
@@ -519,7 +519,7 @@ fn second_session_gets_its_own_slots_and_existing_session_is_untouched() {
         2
     );
     let v = started(&mut a, "second", &[object("other", 0.001, T1)]);
-    assert!(requests(&v, "map.session.stop").is_empty());
+    assert_eq!(requests(&v, "map.session.stop").len(), 0);
     let v = transport_ok(&mut a, &w, 10000);
     assert_eq!(v["result"]["report"]["transportComplete"], true);
 }
@@ -586,7 +586,7 @@ fn session_events_update_remove_and_stop_within_scope() {
     );
     // Stage 3: one session ending no longer cancels other sessions' writes.
     assert!(has_action(&v, "sessionEnded"));
-    assert!(requests(&v, "map.session.stop").is_empty()); // REM already owns the removal
+    assert_eq!(requests(&v, "map.session.stop").len(), 0); // REM already owns the removal
     let v = call(
         &mut a,
         json!({"cmd":"hostEvent","envelope":{"protocolVersion":1,"event":"map.session.stopped","payload":{"sessionId":"synthetic-session","reason":"operator"}}}),
@@ -598,7 +598,7 @@ fn session_events_update_remove_and_stop_within_scope() {
         &[object("synthetic-ple", 0.001, T1)],
     );
     assert!(!has_action(&v, "sessionAuthorized"));
-    assert!(requests(&v, "map.session.stop").is_empty());
+    assert_eq!(requests(&v, "map.session.stop").len(), 0);
 }
 
 #[test]
@@ -613,7 +613,7 @@ fn rem_stop_event_cancels_unsent_work_without_device_clear() {
     // Stage 3: the per-session end replaces the global cancellation.
     assert!(has_action(&v, "sessionEnded"));
     assert!(!has_action(&v, "write"));
-    assert!(requests(&v, "map.session.stop").is_empty());
+    assert_eq!(requests(&v, "map.session.stop").len(), 0);
     let ended = ended_in(&v, "synthetic-session");
     let state = &ended["state"];
     assert_eq!(state["state"], "stopped");
@@ -671,7 +671,7 @@ fn unknown_session_answer_ends_local_session() {
     ready(&mut a);
     colocate(&mut a);
     let list = call(&mut a, json!({"cmd":"disconnected"}));
-    assert!(requests(&list, "map.session.stop").is_empty());
+    assert_eq!(requests(&list, "map.session.stop").len(), 0);
     call(
         &mut a,
         json!({"cmd":"connected","connectionId":"second","writeCapacity":509}),
@@ -759,7 +759,7 @@ fn stale_observer_holds_writes_and_requests_a_fresh_snapshot() {
     assert!(!has_action(&v, "cancelWrites"));
     let refresh = request(&v, "map.observer.snapshot");
     let v = call(&mut a, json!({"cmd":"tick","nowMs":11002}));
-    assert!(requests(&v, "map.observer.snapshot").is_empty()); // one outstanding at a time
+    assert_eq!(requests(&v, "map.observer.snapshot").len(), 0); // one outstanding at a time
     let v = respond_at(&mut a, &refresh, snapshot(0.0, 11000), 11002);
     assert_eq!(v["ok"], true);
 }
@@ -770,7 +770,7 @@ fn tick_refreshes_observer_during_an_active_session() {
     ready(&mut a);
     sync(&mut a);
     let v = call(&mut a, json!({"cmd":"tick","nowMs":10600}));
-    assert!(!requests(&v, "map.observer.snapshot").is_empty());
+    assert_ne!(requests(&v, "map.observer.snapshot").len(), 0);
 }
 
 #[test]
@@ -1012,7 +1012,7 @@ fn host_stop_and_restart_clear_everything_without_replay() {
     sync(&mut a);
     let v = call(&mut a, json!({"cmd":"hostStopped"}));
     assert!(has_action(&v, "disconnect"));
-    assert!(requests(&v, "map.session.stop").is_empty()); // the host is gone
+    assert_eq!(requests(&v, "map.session.stop").len(), 0); // the host is gone
     let v = call(&mut a, json!({"cmd":"status"}))["result"].clone();
     assert_eq!(v["hostReady"], false);
     assert_eq!(v["connected"], false);
@@ -1042,8 +1042,8 @@ fn measurements_stay_raw_until_capture_starts() {
     // Starting capture never offers the earlier measurement to REM.
     assert!(!has_action(&v, "hostRequest"));
     let v = call(&mut a, json!({"cmd":"tick","nowMs":10600}));
-    assert!(requests(&v, "map.observer.snapshot").is_empty());
-    assert!(requests(&v, "map.markers.create").is_empty());
+    assert_eq!(requests(&v, "map.observer.snapshot").len(), 0);
+    assert_eq!(requests(&v, "map.markers.create").len(), 0);
     assert_eq!(host_state(&mut a, 0)["reason"], "capture not started");
     let v = observe(&mut a);
     assert_eq!(v["result"]["host"]["state"], "observerRequested");
@@ -1125,7 +1125,7 @@ fn capture_ends_on_every_authorization_change() {
         let v = observe(&mut a);
         if v["ok"] == true {
             assert_eq!(v["result"]["host"]["reason"], "capture not started");
-            assert!(requests(&v, "map.observer.snapshot").is_empty());
+            assert_eq!(requests(&v, "map.observer.snapshot").len(), 0);
         }
     }
     // A refused observer snapshot ends capture too, naming the REM grant,
@@ -1199,14 +1199,14 @@ fn unknown_creation_is_replayed_once_with_the_same_key_and_payload() {
     assert_eq!(host["resolution"], "replayScheduled");
     // Nothing before the configured delay (synthetic 500 ms).
     let v = call(&mut a, json!({"cmd":"tick","nowMs":10499}));
-    assert!(requests(&v, "map.markers.create").is_empty());
+    assert_eq!(requests(&v, "map.markers.create").len(), 0);
     let v = call(&mut a, json!({"cmd":"tick","nowMs":10500}));
     let replay = request(&v, "map.markers.create");
     assert_eq!(replay["payload"], create["payload"]);
     assert_ne!(replay["requestId"], create["requestId"]);
     assert_eq!(host_state(&mut a, 0)["state"], "replayRequested");
     let v = call(&mut a, json!({"cmd":"tick","nowMs":10600}));
-    assert!(requests(&v, "map.markers.create").is_empty());
+    assert_eq!(requests(&v, "map.markers.create").len(), 0);
     // REM recognises the key and returns the original marker.
     let v = respond_at(
         &mut a,
@@ -1229,12 +1229,12 @@ fn a_failed_replay_stays_unknown_and_is_never_repeated() {
     // The replay times out as well (synthetic hostRequestTimeoutMs 2000).
     let v = call(&mut a, json!({"cmd":"tick","nowMs":12500}));
     assert_eq!(v["ok"], true, "{v}");
-    assert!(requests(&v, "map.markers.create").is_empty());
+    assert_eq!(requests(&v, "map.markers.create").len(), 0);
     let host = host_state(&mut a, 0);
     assert_eq!(host["state"], "unknown");
     assert_eq!(host["resolution"], "final");
     let v = call(&mut a, json!({"cmd":"tick","nowMs":20000}));
-    assert!(requests(&v, "map.markers.create").is_empty());
+    assert_eq!(requests(&v, "map.markers.create").len(), 0);
     let v = respond_at(
         &mut a,
         &replay,
@@ -1256,7 +1256,7 @@ fn replay_is_withdrawn_by_host_restart() {
     assert!(host["reason"].as_str().unwrap().contains("host restarted"));
     start_capture(&mut a);
     let v = call(&mut a, json!({"cmd":"tick","nowMs":11000}));
-    assert!(requests(&v, "map.markers.create").is_empty());
+    assert_eq!(requests(&v, "map.markers.create").len(), 0);
 }
 
 #[test]
@@ -1272,7 +1272,7 @@ fn replay_is_withdrawn_by_disconnect_and_capture_stop() {
     colocate(&mut a);
     start_capture(&mut a);
     let v = call(&mut a, json!({"cmd":"tick","nowMs":11000}));
-    assert!(requests(&v, "map.markers.create").is_empty());
+    assert_eq!(requests(&v, "map.markers.create").len(), 0);
     assert_eq!(host_state(&mut a, 0)["resolution"], "final");
     // Stopping capture withdraws a replay as well.
     let create = create_request(&mut a);
@@ -1281,7 +1281,7 @@ fn replay_is_withdrawn_by_disconnect_and_capture_stop() {
     call(&mut a, json!({"cmd":"stopCapture"}));
     start_capture(&mut a);
     let v = call(&mut a, json!({"cmd":"tick","nowMs":11000}));
-    assert!(requests(&v, "map.markers.create").is_empty());
+    assert_eq!(requests(&v, "map.markers.create").len(), 0);
     assert_eq!(host_state(&mut a, 1)["resolution"], "final");
 }
 
@@ -1324,8 +1324,8 @@ fn stopping_capture_drops_unanswered_snapshots_and_restart_publishes_nothing_old
     let v = call(&mut a, json!({"cmd":"tick","nowMs":11000}));
     // The tick may ask REM for nearby markers to display; it never publishes
     // the earlier observations.
-    assert!(requests(&v, "map.observer.snapshot").is_empty());
-    assert!(requests(&v, "map.markers.create").is_empty());
+    assert_eq!(requests(&v, "map.observer.snapshot").len(), 0);
+    assert_eq!(requests(&v, "map.markers.create").len(), 0);
     assert_eq!(host_state(&mut a, 0)["state"], "retained");
 }
 
@@ -1499,7 +1499,7 @@ fn exhausted_pool_rejects_only_the_new_session_and_released_slots_are_reused() {
     assert_eq!(v["result"]["hostReady"], true);
     assert!(!has_action(&v, "cancelWrites"));
     let v = started(&mut a, "late", &[object("q0", 0.001, T1)]);
-    assert!(requests(&v, "map.session.stop").is_empty()); // terminal
+    assert_eq!(requests(&v, "map.session.stop").len(), 0); // terminal
     let v = stopped_event(&mut a, "big", "operator");
     let released: Vec<u64> = v["result"]["releasedSlots"]
         .as_array()
@@ -1533,7 +1533,7 @@ fn reconciliation_discovers_dropped_started_event() {
     ready(&mut a);
     colocate(&mut a);
     let v = call(&mut a, json!({"cmd":"tick","nowMs":14999}));
-    assert!(requests(&v, "map.session.list").is_empty());
+    assert_eq!(requests(&v, "map.session.list").len(), 0);
     let v = call(&mut a, json!({"cmd":"tick","nowMs":15000}));
     let list = request(&v, "map.session.list");
     let v = respond_at(
@@ -1562,7 +1562,7 @@ fn reordered_and_duplicate_events_never_reauthorize_or_rewrite() {
     stopped_event(&mut a, "early", "operator");
     let v = started(&mut a, "early", &[object("p", 0.001, T1)]);
     assert!(!has_action(&v, "sessionAuthorized"));
-    assert!(requests(&v, "map.session.stop").is_empty());
+    assert_eq!(requests(&v, "map.session.stop").len(), 0);
     let v = sync(&mut a);
     let v = complete(&mut a, &v);
     assert!(!has_action(&v, "write"));
@@ -1617,7 +1617,7 @@ fn unchanged_reconciliation_produces_no_write() {
     assert_eq!(session_in(&v, "settled")["selected"][0]["pleId"], "p");
     // Fresh snapshot: the next list inside the interval fetches nothing.
     let v = call(&mut a, json!({"cmd":"tick","nowMs":19999}));
-    assert!(requests(&v, "map.session.list").is_empty());
+    assert_eq!(requests(&v, "map.session.list").len(), 0);
 }
 
 #[test]
@@ -1665,7 +1665,7 @@ fn session_missing_from_list_ends_without_stop_and_newer_session_survives() {
     assert!(has_action(&v, "sessionAuthorized"), "{v}");
     let v = respond_at(&mut a, &list, json!({"items":[]}), 15001);
     assert_eq!(v["ok"], true, "{v}");
-    assert!(requests(&v, "map.session.stop").is_empty());
+    assert_eq!(requests(&v, "map.session.stop").len(), 0);
     assert!(has_action(&v, "sessionEnded"));
     assert_eq!(session_in(&v, "settled"), Value::Null);
     assert_ne!(session_in(&v, "newer"), Value::Null);
@@ -1980,7 +1980,7 @@ fn nearby_rem_markers_are_shown_automatically_nearest_first() {
     let w = write(&v);
     assert!(w["sessionId"].as_str().unwrap().starts_with("rem-nearby-"));
     // No map.session.stop is ever sent for the automatic set.
-    assert!(requests(&v, "map.session.stop").is_empty());
+    assert_eq!(requests(&v, "map.session.stop").len(), 0);
 }
 
 #[test]
@@ -2094,7 +2094,7 @@ fn stop_pauses_nearby_markers_until_reconnect_and_rem_list_never_ends_them() {
     let v = call(&mut a, json!({"cmd":"stopSync","nowMs":15000}));
     assert_eq!(v["result"]["sessions"], json!([]));
     let v = call(&mut a, json!({"cmd":"tick","nowMs":30000}));
-    assert!(requests(&v, "map.markers.nearby").is_empty());
+    assert_eq!(requests(&v, "map.markers.nearby").len(), 0);
     call(
         &mut a,
         json!({"cmd":"connected","nowMs":30000,"connectionId":"again","writeCapacity":509}),
@@ -2117,7 +2117,7 @@ fn an_unusable_rem_position_is_reported_once_and_not_requested_in_a_loop() {
         snapshot(0.0, 1000),
     );
     assert_eq!(v["ok"], true, "{v}");
-    assert!(requests(&v, "map.observer.snapshot").is_empty(), "{v}");
+    assert_eq!(requests(&v, "map.observer.snapshot").len(), 0, "{v}");
     let problem = v["result"]["observerProblem"].as_str().unwrap().to_owned();
     assert!(problem.contains("9 s old"), "{problem}");
     // Anything that pumps writes neither re-asks nor repeats the message.
@@ -2125,7 +2125,7 @@ fn an_unusable_rem_position_is_reported_once_and_not_requested_in_a_loop() {
         &mut a,
         json!({"cmd":"hostEvent","envelope":{"protocolVersion":1,"event":"map.session.object.updated","payload":{"sessionId":"shared","reason":"moved","object":object("p",0.002,T2)}}}),
     );
-    assert!(requests(&v, "map.observer.snapshot").is_empty());
+    assert_eq!(requests(&v, "map.observer.snapshot").len(), 0);
     assert!(!has_action(&v, "status"));
     // The next interval asks again.
     let v = call(&mut a, json!({"cmd":"tick","nowMs":15000}));
@@ -2145,7 +2145,7 @@ fn phone_gps_places_measurements_without_asking_rem() {
     let v = phone_fix(&mut a, 0.0, 10000, 10000);
     assert_eq!(v["result"]["accepted"], true, "{v}");
     let v = observe(&mut a);
-    assert!(requests(&v, "map.observer.snapshot").is_empty());
+    assert_eq!(requests(&v, "map.observer.snapshot").len(), 0);
     let create = request(&v, "map.markers.create");
     assert!(create["payload"]["lon"].as_f64().unwrap() > 0.0);
     assert_eq!(v["result"]["host"]["state"], "createRequested");

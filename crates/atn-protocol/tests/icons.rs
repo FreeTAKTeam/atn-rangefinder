@@ -58,13 +58,13 @@ fn boundaries_preserve_every_byte_and_actual_write_capacity() {
             let frames = fragment_payload(&bytes, 127, capacity).unwrap();
             assert_eq!(frames.len(), length.div_ceil(payload_capacity));
             if length == 0 {
-                assert!(frames.is_empty());
+                assert_eq!(frames.len(), 0);
                 continue;
             }
             let mut reassembly = IconReassembler::new(ReassemblyLimits::default());
             for frame in &frames {
                 assert!(frame.len() <= capacity);
-                assert!(!IconFragment::parse(frame).unwrap().payload.is_empty());
+                assert_ne!(IconFragment::parse(frame).unwrap().payload.len(), 0);
                 reassembly.push(frame).unwrap();
             }
             assert_eq!(reassembly.finish().unwrap(), bytes);
